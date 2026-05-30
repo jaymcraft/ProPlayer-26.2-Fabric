@@ -1,0 +1,38 @@
+{
+	"schemaVersion": 1,
+	"id": "ai-player",
+	"version": "${version}",
+	"name": "AI-Player",
+	"description": "A minecraft mod which aims to add a \"second player\" into the game which will actually be intelligent.",
+	"authors": [
+		"shasankp000"
+	],
+	"contact": {
+		"homepage": "https://modrinth.com/mod/ai-player",
+		"sources": "https://github.com/shasankp000/AI-player"
+	},
+	"license": "MIT",
+	"icon": "assets/ai-player/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"net.shasankp000.AIPlayer"
+		],
+		"client": [
+			"net.shasankp000.AIPlayerClient"
+		],
+		"fabric-datagen": [
+			"net.shasankp000.AIPlayerDataGenerator"
+		]
+	},
+	"mixins": [
+		"ai-player.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~26.1",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+
+}

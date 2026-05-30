@@ -1,0 +1,78 @@
+
+> Configure project :
+Fabric Loom: 1.15.5
+
+> Task :clean
+
+> Task :compileJava FAILED
+/Users/jayden/AI-Player/src/main/java/net/shasankp000/PlayerUtils/BlockPlacementTool.java:158: error: incompatible types: cannot infer type-variable(s) U
+        Block targetBlock = BuiltInRegistries.BLOCK.getOptional(blockId).map(net.minecraft.core.Holder::value);
+                                                                            ^
+    (argument mismatch; invalid method reference
+      method value in interface Holder<T#2> cannot be applied to given types
+        required: no arguments
+        found:    Block
+        reason: actual and formal argument lists differ in length)
+  where U,T#1,T#2 are type-variables:
+    U extends Object declared in method <U>map(Function<? super T#1,? extends U>)
+    T#1 extends Object declared in class Optional
+    T#2 extends Object declared in interface Holder
+/Users/jayden/AI-Player/src/main/java/net/shasankp000/PlayerUtils/BlockPlacementTool.java:182: error: incompatible types: cannot infer type-variable(s) U
+        Block targetBlock = BuiltInRegistries.BLOCK.getOptional(blockId).map(net.minecraft.core.Holder::value);
+                                                                            ^
+    (argument mismatch; invalid method reference
+      method value in interface Holder<T#2> cannot be applied to given types
+        required: no arguments
+        found:    Block
+        reason: actual and formal argument lists differ in length)
+  where U,T#1,T#2 are type-variables:
+    U extends Object declared in method <U>map(Function<? super T#1,? extends U>)
+    T#1 extends Object declared in class Optional
+    T#2 extends Object declared in interface Holder
+/Users/jayden/AI-Player/src/main/java/net/shasankp000/PlayerUtils/armorUtils.java:60: error: cannot find symbol
+                if (protection > bestProtection) {
+                    ^
+  symbol:   variable protection
+  location: class armorUtils
+/Users/jayden/AI-Player/src/main/java/net/shasankp000/PlayerUtils/armorUtils.java:61: error: cannot find symbol
+                    bestProtection = protection;
+                                     ^
+  symbol:   variable protection
+  location: class armorUtils
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+4 errors
+
+[Incubating] Problems report is available at: file:///Users/jayden/AI-Player/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler output below.
+  /Users/jayden/AI-Player/src/main/java/net/shasankp000/PlayerUtils/BlockPlacementTool.java:158: error: incompatible types: cannot infer type-variable(s) U
+          Block targetBlock = BuiltInRegistries.BLOCK.getOptional(blockId).map(net.minecraft.core.Holder::value);
+                                                                              ^
+      (argument mismatch; invalid method reference
+        method value in interface Holder<T#2> cannot be applied to given types
+          required: no arguments
+          found:    Block
+          reason: actual and formal argument lists differ in length)
+    where U,T#1,T#2 are type-variables:
+      U extends Object declared in method <U>map(Function<? super T#1,? extends U>)
+      T#1 extends Object declared in class Optional
+      T#2 extends Object declared in interface Holder
+  4 errors
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.4.0/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 2s
+2 actionable tasks: 2 executed

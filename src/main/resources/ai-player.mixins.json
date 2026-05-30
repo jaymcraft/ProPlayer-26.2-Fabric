@@ -1,0 +1,15 @@
+{
+	"required": false,
+	"package": "net.shasankp000.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+	],
+	"client": [
+		"ScreenMixin",
+		"InGameHudMixin",
+		"WorldRendererMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
