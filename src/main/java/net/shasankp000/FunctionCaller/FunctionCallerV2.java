@@ -32,6 +32,10 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
@@ -98,6 +102,10 @@ public class FunctionCallerV2 {
     private static final Pattern THINK_BLOCK = Pattern.compile("([\\s\\S]*?)", Pattern.DOTALL);
 
     private static final String selectedLM = AIPlayer.CONFIG.getSelectedLanguageModel();
+
+    private static final Set<String> CRAFT_FILLER_WORDS = Set.of(
+            "a", "an", "the", "some", "one", "me", "for", "please", "item", "items", "batch", "batches"
+    );
 
     // Markov Planner components (initialized on first use)
     private static Planner planner = null;
@@ -987,6 +995,9 @@ public class FunctionCallerV2 {
         if (tryHandleDirectHouseBuild(userPrompt)) {
             return;
         }
+        if (tryHandleDirectCraft(userPrompt)) {
+            return;
+        }
         if (tryHandleDirectWalk(userPrompt)) {
             return;
         }
@@ -1028,6 +1039,9 @@ public class FunctionCallerV2 {
 
     public static void run(String userPrompt, LLMClient client) {
         if (tryHandleDirectHouseBuild(userPrompt)) {
+            return;
+        }
+        if (tryHandleDirectCraft(userPrompt)) {
             return;
         }
         if (tryHandleDirectWalk(userPrompt)) {
@@ -1354,6 +1368,90 @@ public class FunctionCallerV2 {
 
     private record WalkRequest(String direction, int blocks, int seconds) {}
 
+    private static boolean tryHandleDirectCraft(String userInput) {
+        if (!isCraftRequest(userInput)) {
+            return false;
+        }
+
+        if (botSource == null || botSource.getPlayer() == null) {
+            logger.warn("Direct craft request ignored because botSource/player is null");
+            return false;
+        }
+
+        String itemName = extractCraftItemName(userInput);
+        if (itemName.isBlank()) {
+            String clarification = "What item should I craft?";
+            ChatContextManager.setPendingClarification(playerUUID, "craft an item", clarification, botSource.getTextName());
+            sendMessageToPlayer(clarification);
+            return true;
+        }
+
+        int quantity = extractCraftQuantity(userInput);
+        craftItem(itemName, quantity);
+        return true;
+    }
+
+    private static boolean isCraftRequest(String userInput) {
+        if (userInput == null) {
+            return false;
+        }
+
+        String normalized = userInput.toLowerCase(Locale.ROOT);
+        if (normalized.contains("original:") && normalized.contains("craft")) {
+            return true;
+        }
+
+        return normalized.matches(".*\\b(craft|make)\\b.*");
+    }
+
+    private static String extractCraftItemName(String userInput) {
+        Optional<String> clarificationAnswer = extractClarificationAnswer(userInput);
+        if (clarificationAnswer.isPresent()) {
+            return cleanupCraftItemName(clarificationAnswer.get());
+        }
+
+        Matcher matcher = Pattern.compile("(?i)\\b(?:craft|make)\\b\\s+(.+)$").matcher(userInput);
+        if (!matcher.find()) {
+            return "";
+        }
+
+        String rawItem = matcher.group(1)
+                .replaceAll("(?i)\\b\\d+\\b", " ")
+                .replaceAll("(?i)\\b(?:using|with|from|out of)\\b.*$", " ")
+                .replaceAll("(?i)\\b(?:please|now)\\b", " ");
+        return cleanupCraftItemName(rawItem);
+    }
+
+    private static String cleanupCraftItemName(String rawItem) {
+        String cleaned = rawItem.toLowerCase(Locale.ROOT)
+                .replace("minecraft:", "")
+                .replaceAll("[^a-z0-9_\\-\\s]", " ")
+                .replaceAll("[\\-_]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        List<String> keptWords = new ArrayList<>();
+        for (String word : cleaned.split(" ")) {
+            if (!word.isBlank() && !CRAFT_FILLER_WORDS.contains(word)) {
+                keptWords.add(word);
+            }
+        }
+        return String.join("_", keptWords);
+    }
+
+    private static int extractCraftQuantity(String userInput) {
+        Matcher matcher = Pattern.compile("\\b(\\d+)\\b").matcher(userInput == null ? "" : userInput);
+        if (!matcher.find()) {
+            return 1;
+        }
+
+        try {
+            return Math.max(1, Math.min(64, Integer.parseInt(matcher.group(1))));
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
     private static boolean tryHandleDirectHouseBuild(String userInput) {
         if (!isHouseBuildRequest(userInput)) {
             return false;
@@ -1505,6 +1603,257 @@ public class FunctionCallerV2 {
 
         world.setBlock(doorway, Blocks.AIR.defaultBlockState(), 3);
         world.setBlock(doorway.above(), Blocks.AIR.defaultBlockState(), 3);
+    }
+
+    private static void craftItem(String itemName, int batches) {
+        MinecraftServer server = botSource.getServer();
+        server.execute(() -> {
+            try {
+                String result = craftItemOnServerThread(botSource.getPlayer(), itemName, batches);
+                getFunctionOutput(result);
+                storeActionMemory("craftItem", Map.of(
+                        "itemName", itemName,
+                        "quantity", String.valueOf(batches)
+                ), result);
+                ChatUtils.sendChatMessages(botSource, result);
+            } catch (Exception e) {
+                logger.error("Failed to craft item {}", itemName, e);
+                ChatUtils.sendChatMessages(botSource, "I couldn't craft that: " + e.getMessage());
+            }
+        });
+    }
+
+    private static String craftItemOnServerThread(ServerPlayer bot, String itemName, int batches) {
+        Optional<Item> outputItem = resolveCraftOutputItem(itemName);
+        if (outputItem.isEmpty()) {
+            return "I don't know how to craft '" + itemName + "' yet.";
+        }
+
+        CraftRecipe recipe = findCraftRecipe(outputItem.get());
+        if (recipe == null) {
+            return "I know that item, but I don't have a crafting recipe for " + itemId(outputItem.get()) + " yet.";
+        }
+
+        int safeBatches = Math.max(1, Math.min(64, batches));
+        if (!hasIngredients(bot.getInventory(), recipe.ingredients(), safeBatches)) {
+            return "I don't have the ingredients to craft " + itemId(recipe.output()) + ". Need: "
+                    + describeIngredients(recipe.ingredients(), safeBatches) + ".";
+        }
+
+        consumeIngredients(bot.getInventory(), recipe.ingredients(), safeBatches);
+        ItemStack result = new ItemStack(recipe.output(), recipe.outputCount() * safeBatches);
+        boolean added = bot.getInventory().add(result);
+        bot.getInventory().setChanged();
+
+        if (!added && !result.isEmpty()) {
+            bot.drop(result, false);
+            return "Crafted " + recipe.outputCount() * safeBatches + " " + itemId(recipe.output())
+                    + ", but my inventory was full so I dropped it.";
+        }
+
+        return "Crafted " + recipe.outputCount() * safeBatches + " " + itemId(recipe.output()) + ".";
+    }
+
+    private static Optional<Item> resolveCraftOutputItem(String itemName) {
+        String cleaned = cleanupCraftItemName(itemName);
+        if (cleaned.isBlank()) {
+            return Optional.empty();
+        }
+
+        String normalized = normalizeCraftAlias(cleaned);
+        Identifier directId = Identifier.tryParse(normalized.contains(":") ? normalized : "minecraft:" + normalized);
+        if (directId != null) {
+            Optional<Item> direct = BuiltInRegistries.ITEM.getOptional(directId);
+            if (direct.isPresent() && direct.get() != Items.AIR) {
+                return direct;
+            }
+        }
+
+        Item bestMatch = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Identifier id : BuiltInRegistries.ITEM.keySet()) {
+            String path = id.getPath();
+            int score = getItemMatchScore(normalized, path);
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = BuiltInRegistries.ITEM.getOptional(id).orElse(null);
+            }
+        }
+
+        return bestScore > 0 && bestMatch != null && bestMatch != Items.AIR
+                ? Optional.of(bestMatch)
+                : Optional.empty();
+    }
+
+    private static String normalizeCraftAlias(String itemName) {
+        String singular = singularizeCraftItemName(itemName);
+        return switch (singular) {
+            case "wood", "wood_planks", "plank" -> "oak_planks";
+            case "table", "workbench", "crafting" -> "crafting_table";
+            case "torchlight" -> "torch";
+            case "pick", "pickaxe" -> "wooden_pickaxe";
+            case "axe" -> "wooden_axe";
+            case "shovel" -> "wooden_shovel";
+            case "hoe" -> "wooden_hoe";
+            case "sword" -> "wooden_sword";
+            default -> singular;
+        };
+    }
+
+    private static String singularizeCraftItemName(String itemName) {
+        if (itemName == null || itemName.isBlank()) {
+            return "";
+        }
+
+        if (itemName.endsWith("ches") || itemName.endsWith("shes") || itemName.endsWith("xes")) {
+            return itemName.substring(0, itemName.length() - 2);
+        }
+        if (itemName.endsWith("ies") && itemName.length() > 3) {
+            return itemName.substring(0, itemName.length() - 3) + "y";
+        }
+        if (itemName.endsWith("s") && !itemName.endsWith("ss") && itemName.length() > 1) {
+            return itemName.substring(0, itemName.length() - 1);
+        }
+        return itemName;
+    }
+
+    private static int getItemMatchScore(String input, String target) {
+        int score = 0;
+        if (target.equals(input)) score += 1000;
+        else if (target.startsWith(input)) score += 500;
+        else if (target.contains(input)) score += 100;
+        score -= target.length();
+        return score;
+    }
+
+    private static CraftRecipe findCraftRecipe(Item output) {
+        String outputPath = itemId(output).getPath();
+
+        if (outputPath.endsWith("_planks")) {
+            String wood = outputPath.substring(0, outputPath.length() - "_planks".length());
+            return new CraftRecipe(output, 4, List.of(new CraftIngredient(wood + " log/wood", 1, item -> {
+                String path = itemId(item).getPath();
+                return path.equals(wood + "_log")
+                        || path.equals("stripped_" + wood + "_log")
+                        || path.equals(wood + "_wood")
+                        || path.equals("stripped_" + wood + "_wood")
+                        || path.equals(wood + "_stem")
+                        || path.equals("stripped_" + wood + "_stem")
+                        || path.equals(wood + "_hyphae")
+                        || path.equals("stripped_" + wood + "_hyphae");
+            })));
+        }
+
+        Map<Item, CraftRecipe> recipes = new HashMap<>();
+        recipes.put(Items.STICK, new CraftRecipe(Items.STICK, 4, List.of(planks(2))));
+        recipes.put(Items.CRAFTING_TABLE, new CraftRecipe(Items.CRAFTING_TABLE, 1, List.of(planks(4))));
+        recipes.put(Items.CHEST, new CraftRecipe(Items.CHEST, 1, List.of(planks(8))));
+        recipes.put(Items.FURNACE, new CraftRecipe(Items.FURNACE, 1, List.of(exact(Items.COBBLESTONE, 8))));
+        recipes.put(Items.TORCH, new CraftRecipe(Items.TORCH, 4, List.of(coalLike(1), exact(Items.STICK, 1))));
+        recipes.put(Items.BREAD, new CraftRecipe(Items.BREAD, 1, List.of(exact(Items.WHEAT, 3))));
+
+        addToolRecipes(recipes, "wooden", planks(0));
+        addToolRecipes(recipes, "stone", stoneToolMaterial(0));
+
+        return recipes.get(output);
+    }
+
+    private static void addToolRecipes(Map<Item, CraftRecipe> recipes, String material, CraftIngredient baseMaterial) {
+        Item pickaxe = itemByPath(material + "_pickaxe");
+        Item axe = itemByPath(material + "_axe");
+        Item shovel = itemByPath(material + "_shovel");
+        Item hoe = itemByPath(material + "_hoe");
+        Item sword = itemByPath(material + "_sword");
+
+        recipes.put(pickaxe, new CraftRecipe(pickaxe, 1, List.of(baseMaterial.withCount(3), exact(Items.STICK, 2))));
+        recipes.put(axe, new CraftRecipe(axe, 1, List.of(baseMaterial.withCount(3), exact(Items.STICK, 2))));
+        recipes.put(shovel, new CraftRecipe(shovel, 1, List.of(baseMaterial.withCount(1), exact(Items.STICK, 2))));
+        recipes.put(hoe, new CraftRecipe(hoe, 1, List.of(baseMaterial.withCount(2), exact(Items.STICK, 2))));
+        recipes.put(sword, new CraftRecipe(sword, 1, List.of(baseMaterial.withCount(2), exact(Items.STICK, 1))));
+    }
+
+    private static Item itemByPath(String path) {
+        return BuiltInRegistries.ITEM.getOptional(Identifier.tryParse("minecraft:" + path)).orElse(Items.AIR);
+    }
+
+    private static CraftIngredient exact(Item item, int count) {
+        return new CraftIngredient(itemId(item).getPath(), count, candidate -> candidate == item);
+    }
+
+    private static CraftIngredient planks(int count) {
+        return new CraftIngredient("any planks", count, item -> itemId(item).getPath().endsWith("_planks"));
+    }
+
+    private static CraftIngredient coalLike(int count) {
+        return new CraftIngredient("coal or charcoal", count, item -> item == Items.COAL || item == Items.CHARCOAL);
+    }
+
+    private static CraftIngredient stoneToolMaterial(int count) {
+        return new CraftIngredient("cobblestone or cobbled deepslate", count,
+                item -> item == Items.COBBLESTONE || item == Items.COBBLED_DEEPSLATE);
+    }
+
+    private static boolean hasIngredients(Inventory inventory, List<CraftIngredient> ingredients, int batches) {
+        for (CraftIngredient ingredient : ingredients) {
+            if (countMatchingItems(inventory, ingredient) < ingredient.count() * batches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int countMatchingItems(Inventory inventory, CraftIngredient ingredient) {
+        int count = 0;
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (!stack.isEmpty() && ingredient.matches(stack.getItem())) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static void consumeIngredients(Inventory inventory, List<CraftIngredient> ingredients, int batches) {
+        for (CraftIngredient ingredient : ingredients) {
+            int remaining = ingredient.count() * batches;
+            for (int i = 0; i < inventory.getContainerSize() && remaining > 0; i++) {
+                ItemStack stack = inventory.getItem(i);
+                if (stack.isEmpty() || !ingredient.matches(stack.getItem())) {
+                    continue;
+                }
+
+                int removed = Math.min(remaining, stack.getCount());
+                stack.shrink(removed);
+                if (stack.isEmpty()) {
+                    inventory.setItem(i, ItemStack.EMPTY);
+                }
+                remaining -= removed;
+            }
+        }
+    }
+
+    private static String describeIngredients(List<CraftIngredient> ingredients, int batches) {
+        List<String> parts = new ArrayList<>();
+        for (CraftIngredient ingredient : ingredients) {
+            parts.add((ingredient.count() * batches) + " " + ingredient.label());
+        }
+        return String.join(", ", parts);
+    }
+
+    private static Identifier itemId(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item);
+    }
+
+    private record CraftRecipe(Item output, int outputCount, List<CraftIngredient> ingredients) {}
+
+    private record CraftIngredient(String label, int count, java.util.function.Predicate<Item> matcher) {
+        private boolean matches(Item item) {
+            return matcher.test(item);
+        }
+
+        private CraftIngredient withCount(int newCount) {
+            return new CraftIngredient(label, newCount, matcher);
+        }
     }
 
     private static void storeActionMemory(String functionName, Map<String, String> params, String result) {
@@ -2241,6 +2590,12 @@ public class FunctionCallerV2 {
                     logger.info("Calling method: placeBlock with targetX={} targetY={} targetZ={} blockType={}",
                             targetX, targetY, targetZ, blockType);
                     Tools.placeBlock(targetX, targetY, targetZ, blockType);
+                }
+                case "craftItem" -> {
+                    String itemName = resolvePlaceholder(paramMap.get("itemName"), state);
+                    int quantity = parseDurationSeconds(resolvePlaceholder(paramMap.getOrDefault("quantity", "1"), state));
+                    logger.info("Calling method: craftItem with itemName={} quantity={}", itemName, quantity);
+                    craftItem(itemName, quantity);
                 }
                 case "getOxygenLevel" -> {
                     logger.info("Calling method: getOxygenLevel");

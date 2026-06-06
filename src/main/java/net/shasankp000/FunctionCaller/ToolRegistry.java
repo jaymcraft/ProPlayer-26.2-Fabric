@@ -242,6 +242,24 @@ public class ToolRegistry {
             ),
 
             new Tool(
+                    "craftItem",
+                    """
+                    Crafts a supported item from the bot's current inventory.
+                    Consumes the required ingredients and adds the crafted output to inventory.
+                    Supports common survival recipes such as planks, sticks, crafting tables, chests, furnaces, torches, bread, and basic wooden/stone tools.
+                    """,
+                    List.of(
+                            new Tool.Parameter("itemName", "Item to craft, e.g. 'oak_planks', 'stick', 'crafting_table', 'stone_pickaxe'."),
+                            new Tool.Parameter("quantity", "How many recipe batches to craft. Defaults to 1.")
+                    ),
+                    Set.of("lastCrafted.item", "lastCrafted.quantity"),
+                    (sharedState, paramMap, result) -> {
+                        sharedState.put("lastCrafted.item", paramMap.get("itemName"));
+                        sharedState.put("lastCrafted.quantity", paramMap.get("quantity"));
+                    }
+            ),
+
+            new Tool(
                     "searchBlocks",
                     """
                     Efficiently searches for blocks in an expanding radius around the bot.
