@@ -1751,9 +1751,11 @@ public class FunctionCallerV2 {
                 + " " + buildingType.displayName() + " using " + blockId + ".");
         executor.submit(() -> {
             int placed = 0;
+            Set<BlockPos> blueprintBlocks = new HashSet<>(blueprint);
+            Set<BlockPos> temporaryPillars = Collections.synchronizedSet(new LinkedHashSet<>());
             try {
                 for (BlockPos pos : blueprint) {
-                    String placementResult = placeStructureBlockLikePlayer(bot, pos, blockId.toString()).get(120, TimeUnit.SECONDS);
+                    String placementResult = placeStructureBlockLikePlayer(bot, pos, blockId.toString(), temporaryPillars, blueprintBlocks).get(120, TimeUnit.SECONDS);
                     if (placementResult.startsWith("❌") || placementResult.startsWith("⚠️")) {
                         String failure = "I had to stop building the " + buildingType.displayName() + ": " + placementResult;
                         getFunctionOutput(failure);
@@ -1790,21 +1792,22 @@ public class FunctionCallerV2 {
                 logger.error("Failed to build {}", buildingType.displayName(), e);
                 ChatUtils.sendChatMessages(botSource, "I couldn't build the " + buildingType.displayName() + ": " + e.getMessage());
             } finally {
+                cleanupTemporaryPillars(bot, temporaryPillars, blueprintBlocks, blockId.toString());
                 AutoFaceEntity.setBotExecutingTask(false);
             }
         });
     }
 
-    private static CompletableFuture<String> placeStructureBlockLikePlayer(ServerPlayer bot, BlockPos pos, String blockId) {
+    private static CompletableFuture<String> placeStructureBlockLikePlayer(ServerPlayer bot, BlockPos pos, String blockId, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                String supportResult = ensureStructurePlacementSupport(bot, pos, blockId, 0);
+                String supportResult = ensureStructurePlacementSupport(bot, pos, blockId, temporaryPillars, blueprintBlocks, 0);
                 if (supportResult.startsWith("❌") || supportResult.startsWith("⚠️")) {
                     return supportResult;
                 }
 
                 while (pos.getY() - bot.blockPosition().getY() > 3) {
-                    String pillarResult = pillarUpLikePlayer(bot, blockId).get(10, TimeUnit.SECONDS);
+                    String pillarResult = pillarUpLikePlayer(bot, blockId, temporaryPillars, blueprintBlocks).get(10, TimeUnit.SECONDS);
                     if (pillarResult.startsWith("❌") || pillarResult.startsWith("⚠️")) {
                         return pillarResult;
                     }
@@ -1825,7 +1828,7 @@ public class FunctionCallerV2 {
         }, executor);
     }
 
-    private static String ensureStructurePlacementSupport(ServerPlayer bot, BlockPos targetPos, String blockId, int depth) throws Exception {
+    private static String ensureStructurePlacementSupport(ServerPlayer bot, BlockPos targetPos, String blockId, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks, int depth) throws Exception {
         if (depth > 16) {
             return "❌ Could not build support high enough for " + targetPos;
         }
@@ -1846,7 +1849,7 @@ public class FunctionCallerV2 {
             return hasAdjacentSolidPlacementSurface(world, targetPos) ? "✅ Supported" : "❌ No placeable support near " + targetPos;
         }
 
-        String lowerSupportResult = ensureStructurePlacementSupport(bot, supportPos, blockId, depth + 1);
+        String lowerSupportResult = ensureStructurePlacementSupport(bot, supportPos, blockId, temporaryPillars, blueprintBlocks, depth + 1);
         if (lowerSupportResult.startsWith("❌") || lowerSupportResult.startsWith("⚠️")) {
             return lowerSupportResult;
         }
@@ -1857,14 +1860,18 @@ public class FunctionCallerV2 {
         }
 
         while (supportPos.getY() - bot.blockPosition().getY() > 3) {
-            String pillarResult = pillarUpLikePlayer(bot, blockId).get(10, TimeUnit.SECONDS);
+            String pillarResult = pillarUpLikePlayer(bot, blockId, temporaryPillars, blueprintBlocks).get(10, TimeUnit.SECONDS);
             if (pillarResult.startsWith("❌") || pillarResult.startsWith("⚠️")) {
                 return pillarResult;
             }
             Thread.sleep(350L);
         }
 
-        return BlockPlacementTool.placeBlock(bot, supportPos, blockId).get(10, TimeUnit.SECONDS);
+        String result = BlockPlacementTool.placeBlock(bot, supportPos, blockId).get(10, TimeUnit.SECONDS);
+        if (isSuccessfulPlacement(result) && !blueprintBlocks.contains(supportPos)) {
+            temporaryPillars.add(supportPos);
+        }
+        return result;
     }
 
     private static boolean hasAdjacentSolidPlacementSurface(ServerLevel world, BlockPos targetPos) {
@@ -1878,7 +1885,7 @@ public class FunctionCallerV2 {
         return false;
     }
 
-    private static CompletableFuture<String> pillarUpLikePlayer(ServerPlayer bot, String blockId) {
+    private static CompletableFuture<String> pillarUpLikePlayer(ServerPlayer bot, String blockId, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks) {
         CompletableFuture<String> future = new CompletableFuture<>();
         MinecraftServer server = ((ServerLevel) bot.level()).getServer();
         BlockPos jumpStartFeet = bot.blockPosition();
@@ -1895,6 +1902,9 @@ public class FunctionCallerV2 {
                     return;
                 }
                 String result = BlockPlacementTool.placeBlock(bot, supportPos, blockId).get(10, TimeUnit.SECONDS);
+                if (isSuccessfulPlacement(result) && !blueprintBlocks.contains(supportPos)) {
+                    temporaryPillars.add(supportPos);
+                }
                 future.complete(result);
             } catch (Exception e) {
                 logger.error("Failed to pillar up like player", e);
@@ -1903,6 +1913,48 @@ public class FunctionCallerV2 {
         });
 
         return future;
+    }
+
+    private static boolean isSuccessfulPlacement(String result) {
+        return result != null && result.startsWith("✅");
+    }
+
+    private static void cleanupTemporaryPillars(ServerPlayer bot, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks, String blockId) {
+        if (temporaryPillars.isEmpty()) {
+            return;
+        }
+
+        List<BlockPos> cleanupOrder = new ArrayList<>(temporaryPillars);
+        cleanupOrder.removeIf(blueprintBlocks::contains);
+        cleanupOrder.sort(Comparator.comparingInt((BlockPos pos) -> pos.getY()).reversed());
+
+        int removed = 0;
+        for (BlockPos pillarPos : cleanupOrder) {
+            try {
+                ServerLevel world = (ServerLevel) bot.level();
+                BlockState state = world.getBlockState(pillarPos);
+                Identifier currentBlockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                if (state.isAir() || !blockId.equals(currentBlockId.toString())) {
+                    continue;
+                }
+
+                if (!isWithinPlacementRange(bot, pillarPos)) {
+                    BlockPos nearby = chooseBuilderPosition(bot, pillarPos);
+                    startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true).get(120, TimeUnit.SECONDS);
+                }
+
+                String mineResult = MiningTool.mineBlock(bot, pillarPos).get(10, TimeUnit.SECONDS);
+                logger.info("Cleaned temporary build pillar {} via {}", pillarPos, mineResult);
+                removed++;
+                Thread.sleep(100L);
+            } catch (Exception e) {
+                logger.warn("Could not clean temporary build pillar {}", pillarPos, e);
+            }
+        }
+
+        if (removed > 0) {
+            logger.info("Removed {} temporary build pillar blocks", removed);
+        }
     }
 
     private static BlockPos findPillarPlacementPos(ServerPlayer bot) {
