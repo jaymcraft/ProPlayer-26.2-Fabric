@@ -1450,20 +1450,44 @@ public class FunctionCallerV2 {
                 for (int tick = 0; tick < ticks; tick++) {
                     double progress = (tick + 1) / (double) ticks;
                     Vec3 next = start.lerp(target, progress);
-                    server.execute(() -> bot.teleportTo(
-                            bot.level(),
-                            next.x,
-                            next.y,
-                            next.z,
-                            Set.of(),
-                            bot.getYRot(),
-                            bot.getXRot(),
-                            false
-                    ));
+                    CompletableFuture<Boolean> step = new CompletableFuture<>();
+                    server.execute(() -> {
+                        if (!canBotOccupy(bot, next)) {
+                            step.complete(false);
+                            return;
+                        }
+
+                        bot.teleportTo(
+                                bot.level(),
+                                next.x,
+                                next.y,
+                                next.z,
+                                Set.of(),
+                                bot.getYRot(),
+                                bot.getXRot(),
+                                false
+                        );
+                        step.complete(true);
+                    });
+                    if (!step.get(1, TimeUnit.SECONDS)) {
+                        server.execute(() -> {
+                            AutoFaceEntity.isBotMoving = false;
+                            AutoFaceEntity.setBotExecutingTask(false);
+                        });
+                        future.complete("❌ Movement blocked by a solid block");
+                        return;
+                    }
                     Thread.sleep(50L);
                 }
 
                 server.execute(() -> {
+                    if (!canBotOccupy(bot, target)) {
+                        AutoFaceEntity.isBotMoving = false;
+                        AutoFaceEntity.setBotExecutingTask(false);
+                        future.complete("❌ Movement target is blocked by a solid block");
+                        return;
+                    }
+
                     bot.teleportTo(
                             bot.level(),
                             target.x,
@@ -1504,6 +1528,29 @@ public class FunctionCallerV2 {
         });
 
         return future;
+    }
+
+    private static boolean canBotOccupy(ServerPlayer bot, Vec3 position) {
+        ServerLevel world = (ServerLevel) bot.level();
+        BlockPos feet = BlockPos.containing(position.x, position.y, position.z);
+        return isReplaceableForMovement(world, feet)
+                && isReplaceableForMovement(world, feet.above())
+                && isMovementPathClear(bot, world, bot.getEyePosition(1.0F), position.add(0.0, bot.getEyeHeight(), 0.0));
+    }
+
+    private static boolean isReplaceableForMovement(ServerLevel world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isAir() || state.canBeReplaced();
+    }
+
+    private static boolean isMovementPathClear(ServerPlayer bot, ServerLevel world, Vec3 from, Vec3 to) {
+        return world.clip(new net.minecraft.world.level.ClipContext(
+                from,
+                to,
+                net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                net.minecraft.world.level.ClipContext.Fluid.NONE,
+                bot
+        )).getType() == net.minecraft.world.phys.HitResult.Type.MISS;
     }
 
     private static boolean tryHandleDirectCraft(String userInput) {
@@ -1815,12 +1862,17 @@ public class FunctionCallerV2 {
                 }
 
                 if (!isWithinPlacementRange(bot, pos)) {
-                    BlockPos nearby = chooseBuilderPosition(bot, pos);
-                    String moveResult = startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true)
-                            .get(120, TimeUnit.SECONDS);
-                    logger.info("Moved near structure placement target {} via {}", pos, moveResult);
+                    String moveResult = moveNearStructureTarget(bot, pos);
+                    if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                        return moveResult;
+                    }
                 }
-                return BlockPlacementTool.placeBlock(bot, pos, blockId).get(10, TimeUnit.SECONDS);
+
+                String placementResult = BlockPlacementTool.placeBlock(bot, pos, blockId).get(10, TimeUnit.SECONDS);
+                if (placementResult.contains("Cannot place through blocks")) {
+                    placementResult = tryPlaceFromNearbyAngles(bot, pos, blockId, placementResult);
+                }
+                return placementResult;
             } catch (Exception e) {
                 logger.error("Failed to place structure block like player at {}", pos, e);
                 return "❌ Failed to place block: " + e.getMessage();
@@ -1828,8 +1880,122 @@ public class FunctionCallerV2 {
         }, executor);
     }
 
+    private static String moveNearStructureTarget(ServerPlayer bot, BlockPos targetPos) throws Exception {
+        BlockPos nearby = chooseVisibleBuilderPosition(bot, targetPos).orElseGet(() -> chooseBuilderPosition(bot, targetPos));
+        String moveResult = startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true)
+                .get(120, TimeUnit.SECONDS);
+        logger.info("Moved near structure placement target {} via {}", targetPos, moveResult);
+        return moveResult;
+    }
+
+    private static Optional<BlockPos> chooseVisibleBuilderPosition(ServerPlayer bot, BlockPos targetPos) {
+        List<BlockPos> candidates = findVisibleBuilderPositions(bot, targetPos);
+        if (!candidates.isEmpty()) {
+            return Optional.of(candidates.getFirst());
+        }
+        return Optional.empty();
+    }
+
+    private static String tryPlaceFromNearbyAngles(ServerPlayer bot, BlockPos targetPos, String blockId, String originalResult) throws Exception {
+        List<BlockPos> candidates = findVisibleBuilderPositions(bot, targetPos);
+        if (candidates.isEmpty()) {
+            candidates = findNearbyBuilderPositions(bot, targetPos);
+        }
+
+        for (BlockPos candidate : candidates) {
+            if (bot.blockPosition().distManhattan(candidate) > 0) {
+                String moveResult = startPreciseCoordinateMove(candidate.getX(), candidate.getY(), candidate.getZ(), true)
+                        .get(120, TimeUnit.SECONDS);
+                logger.info("Trying alternate build angle {} for target {} via {}", candidate, targetPos, moveResult);
+                if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                    continue;
+                }
+            }
+
+            String retryResult = BlockPlacementTool.placeBlock(bot, targetPos, blockId).get(10, TimeUnit.SECONDS);
+            if (!retryResult.contains("Cannot place through blocks")) {
+                return retryResult;
+            }
+        }
+
+        return originalResult;
+    }
+
+    private static List<BlockPos> findVisibleBuilderPositions(ServerPlayer bot, BlockPos targetPos) {
+        List<BlockPos> candidates = findNearbyBuilderPositions(bot, targetPos);
+        candidates.removeIf(candidate -> !canSeeAnyPlacementFace(
+                (ServerLevel) bot.level(),
+                bot,
+                new Vec3(candidate.getX() + 0.5, candidate.getY(), candidate.getZ() + 0.5),
+                targetPos
+        ));
+        return candidates;
+    }
+
+    private static List<BlockPos> findNearbyBuilderPositions(ServerPlayer bot, BlockPos targetPos) {
+        ServerLevel world = (ServerLevel) bot.level();
+        BlockPos currentPos = bot.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+
+        for (int radius = 1; radius <= 4; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                        continue;
+                    }
+
+                    int candidateX = targetPos.getX() + dx;
+                    int candidateZ = targetPos.getZ() + dz;
+                    int candidateY = findStandableBuilderY(world, candidateX, candidateZ, currentPos.getY());
+                    BlockPos candidate = new BlockPos(candidateX, candidateY, candidateZ);
+                    Vec3 candidatePosition = new Vec3(candidateX + 0.5, candidateY, candidateZ + 0.5);
+                    if (!canBotOccupy(bot, candidatePosition) || Math.sqrt(targetPos.distToCenterSqr(candidatePosition)) > 4.5) {
+                        continue;
+                    }
+
+                    candidates.add(candidate);
+                }
+            }
+        }
+
+        candidates.sort(Comparator
+                .comparingInt((BlockPos candidate) -> currentPos.distManhattan(candidate))
+                .thenComparingInt(candidate -> Math.abs(candidate.getX() - targetPos.getX()) + Math.abs(candidate.getZ() - targetPos.getZ())));
+        return candidates;
+    }
+
+    private static boolean canSeeAnyPlacementFace(ServerLevel world, ServerPlayer bot, Vec3 candidatePosition, BlockPos targetPos) {
+        Vec3 eyePosition = candidatePosition.add(0.0, bot.getEyeHeight(), 0.0);
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacentPos = targetPos.relative(direction);
+            BlockState adjacentState = world.getBlockState(adjacentPos);
+            if (adjacentState.isAir() || !adjacentState.isRedstoneConductor(world, adjacentPos)) {
+                continue;
+            }
+
+            Vec3 hitVec = Vec3.atCenterOf(adjacentPos).add(
+                    direction.getOpposite().getStepX() * 0.5,
+                    direction.getOpposite().getStepY() * 0.5,
+                    direction.getOpposite().getStepZ() * 0.5
+            );
+            net.minecraft.world.phys.BlockHitResult lineOfSight = world.clip(new net.minecraft.world.level.ClipContext(
+                    eyePosition,
+                    hitVec,
+                    net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                    net.minecraft.world.level.ClipContext.Fluid.NONE,
+                    bot
+            ));
+            if (lineOfSight.getType() == net.minecraft.world.phys.HitResult.Type.MISS
+                    || (lineOfSight.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK
+                    && lineOfSight.getBlockPos().equals(adjacentPos))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static String ensureStructurePlacementSupport(ServerPlayer bot, BlockPos targetPos, String blockId, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks, int depth) throws Exception {
-        if (depth > 16) {
+        if (depth > 128) {
             return "❌ Could not build support high enough for " + targetPos;
         }
 
@@ -1839,7 +2005,8 @@ public class FunctionCallerV2 {
             return "✅ Target already has a block at " + targetPos;
         }
 
-        if (hasAdjacentSolidPlacementSurface(world, targetPos)) {
+        boolean needsVerticalSupport = (blueprintBlocks.contains(targetPos) || depth > 0) && !hasSolidBlockBelow(world, targetPos);
+        if (!needsVerticalSupport && hasAdjacentSolidPlacementSurface(world, targetPos)) {
             return "✅ Supported";
         }
 
@@ -1856,7 +2023,10 @@ public class FunctionCallerV2 {
 
         if (!isWithinPlacementRange(bot, supportPos)) {
             BlockPos nearby = chooseBuilderPosition(bot, supportPos);
-            startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true).get(120, TimeUnit.SECONDS);
+            String moveResult = startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true).get(120, TimeUnit.SECONDS);
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                return moveResult;
+            }
         }
 
         while (supportPos.getY() - bot.blockPosition().getY() > 3) {
@@ -1868,8 +2038,8 @@ public class FunctionCallerV2 {
         }
 
         String result = BlockPlacementTool.placeBlock(bot, supportPos, blockId).get(10, TimeUnit.SECONDS);
-        if (isSuccessfulPlacement(result) && !blueprintBlocks.contains(supportPos)) {
-            temporaryPillars.add(supportPos);
+        if (result.contains("Cannot place through blocks")) {
+            result = tryPlaceFromNearbyAngles(bot, supportPos, blockId, result);
         }
         return result;
     }
@@ -1883,6 +2053,12 @@ public class FunctionCallerV2 {
             }
         }
         return false;
+    }
+
+    private static boolean hasSolidBlockBelow(ServerLevel world, BlockPos targetPos) {
+        BlockPos belowPos = targetPos.below();
+        BlockState belowState = world.getBlockState(belowPos);
+        return !belowState.isAir() && belowState.isRedstoneConductor(world, belowPos);
     }
 
     private static CompletableFuture<String> pillarUpLikePlayer(ServerPlayer bot, String blockId, Set<BlockPos> temporaryPillars, Set<BlockPos> blueprintBlocks) {
@@ -1940,7 +2116,11 @@ public class FunctionCallerV2 {
 
                 if (!isWithinPlacementRange(bot, pillarPos)) {
                     BlockPos nearby = chooseBuilderPosition(bot, pillarPos);
-                    startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true).get(120, TimeUnit.SECONDS);
+                    String moveResult = startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true).get(120, TimeUnit.SECONDS);
+                    if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                        logger.warn("Skipped temporary pillar cleanup at {} because movement was blocked: {}", pillarPos, moveResult);
+                        continue;
+                    }
                 }
 
                 String mineResult = MiningTool.mineBlock(bot, pillarPos).get(10, TimeUnit.SECONDS);

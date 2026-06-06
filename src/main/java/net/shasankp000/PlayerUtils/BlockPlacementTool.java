@@ -10,10 +10,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.shasankp000.Entity.LookController;
 import org.slf4j.Logger;
@@ -101,9 +103,12 @@ public class BlockPlacementTool {
                 }
 
                 // Step 6: Find a suitable face to place against
-                Direction placementDirection = findPlacementDirection(world, targetPos);
+                boolean hasPlacementSurface = hasPlacementSurface(world, targetPos);
+                Direction placementDirection = findPlacementDirection(world, bot, targetPos);
                 if (placementDirection == null) {
-                    String error = "❌ No suitable surface found to place block against at " + targetPos;
+                    String error = hasPlacementSurface
+                            ? "❌ Cannot place through blocks at " + targetPos
+                            : "❌ No suitable surface found to place block against at " + targetPos;
                     LOGGER.warn(error);
                     return error;
                 }
@@ -119,6 +124,12 @@ public class BlockPlacementTool {
                         placementDirection.getOpposite().getStepY() * 0.5,
                         placementDirection.getOpposite().getStepZ() * 0.5
                 );
+
+                if (!hasLineOfSightToPlacementFace(world, bot, adjacentPos, hitVec)) {
+                    String error = "❌ Cannot place through blocks at " + targetPos;
+                    LOGGER.warn(error);
+                    return error;
+                }
 
                 BlockHitResult hitResult = new BlockHitResult(
                         hitVec,
@@ -257,7 +268,7 @@ public class BlockPlacementTool {
      * Finds a suitable direction to place a block against an adjacent block
      * Returns the direction from the target position to the adjacent block
      */
-    private static Direction findPlacementDirection(Level world, BlockPos targetPos) {
+    private static Direction findPlacementDirection(Level world, ServerPlayer bot, BlockPos targetPos) {
         // Check all 6 directions for a solid block to place against
         for (Direction direction : Direction.values()) {
             BlockPos adjacentPos = targetPos.relative(direction);
@@ -265,9 +276,39 @@ public class BlockPlacementTool {
 
             // Check if the adjacent block is solid (can be placed against)
             if (!adjacentState.isAir() && adjacentState.isRedstoneConductor(world, adjacentPos)) {
-                return direction;
+                Vec3 hitVec = Vec3.atCenterOf(adjacentPos).add(
+                        direction.getOpposite().getStepX() * 0.5,
+                        direction.getOpposite().getStepY() * 0.5,
+                        direction.getOpposite().getStepZ() * 0.5
+                );
+                if (hasLineOfSightToPlacementFace(world, bot, adjacentPos, hitVec)) {
+                    return direction;
+                }
             }
         }
         return null;
+    }
+
+    private static boolean hasPlacementSurface(Level world, BlockPos targetPos) {
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacentPos = targetPos.relative(direction);
+            BlockState adjacentState = world.getBlockState(adjacentPos);
+            if (!adjacentState.isAir() && adjacentState.isRedstoneConductor(world, adjacentPos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasLineOfSightToPlacementFace(Level world, ServerPlayer bot, BlockPos adjacentPos, Vec3 hitVec) {
+        BlockHitResult lineOfSight = world.clip(new ClipContext(
+                bot.getEyePosition(1.0F),
+                hitVec,
+                ClipContext.Block.COLLIDER,
+                ClipContext.Fluid.NONE,
+                bot
+        ));
+        return lineOfSight.getType() == HitResult.Type.MISS
+                || (lineOfSight.getType() == HitResult.Type.BLOCK && lineOfSight.getBlockPos().equals(adjacentPos));
     }
 }
