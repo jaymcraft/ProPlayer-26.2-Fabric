@@ -1753,7 +1753,7 @@ public class FunctionCallerV2 {
             int placed = 0;
             try {
                 for (BlockPos pos : blueprint) {
-                    String placementResult = placeManualHouseBlock(bot, pos, wallBlock).get(10, TimeUnit.SECONDS);
+                    String placementResult = placeStructureBlockLikePlayer(bot, pos, blockId.toString()).get(120, TimeUnit.SECONDS);
                     if (placementResult.startsWith("❌") || placementResult.startsWith("⚠️")) {
                         String failure = "I had to stop building the " + buildingType.displayName() + ": " + placementResult;
                         getFunctionOutput(failure);
@@ -1795,36 +1795,39 @@ public class FunctionCallerV2 {
         });
     }
 
-    private static CompletableFuture<String> placeManualHouseBlock(ServerPlayer bot, BlockPos pos, Block wallBlock) {
-        CompletableFuture<String> future = new CompletableFuture<>();
-        MinecraftServer server = ((ServerLevel) bot.level()).getServer();
-        server.execute(() -> {
+    private static CompletableFuture<String> placeStructureBlockLikePlayer(ServerPlayer bot, BlockPos pos, String blockId) {
+        return CompletableFuture.supplyAsync(() -> {
             try {
-                ServerLevel world = (ServerLevel) bot.level();
-                BlockState targetState = world.getBlockState(pos);
-                if (!targetState.isAir() && !targetState.canBeReplaced()) {
-                    future.complete("❌ Target position is already occupied by: " + targetState.getBlock().getName().getString());
-                    return;
+                if (!isWithinPlacementRange(bot, pos)) {
+                    BlockPos nearby = chooseBuilderPosition(bot.blockPosition(), pos);
+                    String moveResult = startPreciseCoordinateMove(nearby.getX(), nearby.getY(), nearby.getZ(), true)
+                            .get(120, TimeUnit.SECONDS);
+                    logger.info("Moved near structure placement target {} via {}", pos, moveResult);
                 }
-
-                Item wallItem = Item.byBlock(wallBlock);
-                if (wallItem == Items.AIR || !consumeInventoryItem(bot.getInventory(), wallItem, 1)) {
-                    future.complete("❌ Block not found in inventory: " + BuiltInRegistries.BLOCK.getKey(wallBlock));
-                    return;
-                }
-
-                world.setBlock(pos, wallBlock.defaultBlockState(), 3);
-                if (world.getBlockState(pos).getBlock() == wallBlock) {
-                    future.complete("✅ Placed " + BuiltInRegistries.BLOCK.getKey(wallBlock) + " at x:"
-                            + pos.getX() + " y:" + pos.getY() + " z:" + pos.getZ());
-                } else {
-                    future.complete("⚠️ Block was consumed but did not appear at target position");
-                }
+                return BlockPlacementTool.placeBlock(bot, pos, blockId).get(10, TimeUnit.SECONDS);
             } catch (Exception e) {
-                future.complete("❌ Failed to place block: " + e.getMessage());
+                logger.error("Failed to place structure block like player at {}", pos, e);
+                return "❌ Failed to place block: " + e.getMessage();
             }
-        });
-        return future;
+        }, executor);
+    }
+
+    private static boolean isWithinPlacementRange(ServerPlayer bot, BlockPos targetPos) {
+        return Math.sqrt(targetPos.distToCenterSqr(bot.position())) <= 4.5;
+    }
+
+    private static BlockPos chooseBuilderPosition(BlockPos currentPos, BlockPos targetPos) {
+        int dx = Integer.compare(currentPos.getX(), targetPos.getX());
+        int dz = Integer.compare(currentPos.getZ(), targetPos.getZ());
+        if (dx == 0 && dz == 0) {
+            dz = 1;
+        }
+
+        return new BlockPos(
+                targetPos.getX() + dx * 2,
+                Math.max(currentPos.getY(), targetPos.getY()),
+                targetPos.getZ() + dz * 2
+        );
     }
 
     private static boolean consumeInventoryItem(Inventory inventory, Item item, int count) {
