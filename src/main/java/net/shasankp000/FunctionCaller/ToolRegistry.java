@@ -127,6 +127,19 @@ public class ToolRegistry {
                     (sharedState, paramMap, result) -> sharedState.put("lastAttack.status", result)
             ),
 
+            new Tool(
+                    "attackHostileMobIfSeeable",
+                    """
+                    Finds the highest-priority hostile mob within detection range that the bot can see, faces it, equips a melee weapon when needed, and attacks it.
+                    Uses a ranged weapon if the mob is visible, farther than melee reach, and the bot has ammo.
+                    """,
+                    List.of(
+                            new Tool.Parameter("None", "No parameters needed.")
+                    ),
+                    Set.of("lastAttack.status"),
+                    (sharedState, paramMap, result) -> sharedState.put("lastAttack.status", result)
+            ),
+
 
             new Tool(
                     "mineBlock",

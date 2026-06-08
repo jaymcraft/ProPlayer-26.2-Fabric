@@ -651,7 +651,14 @@ public class BotEventHandler {
             case HOTBAR_7 -> performAction("hotbar7", botSource);
             case HOTBAR_8 -> performAction("hotbar8", botSource);
             case HOTBAR_9 -> performAction("hotbar9", botSource);
-            case STAY -> System.out.println("Performing action: Stay and do nothing");
+            case STAY -> {
+                if (HostileMobAttackTool.findBestVisibleHostileMob(bot) != null) {
+                    System.out.println("STAY overridden: seeable hostile mob detected, attacking instead");
+                    performAction("attack", botSource);
+                } else {
+                    System.out.println("Performing action: Stay and do nothing");
+                }
+            }
         }
     }
 
@@ -806,57 +813,12 @@ public class BotEventHandler {
                 }
 
                 startAction(botName, "ATTACK");
+                String attackResult = HostileMobAttackTool.attackHostileMobIfSeeable(bot, server, botSource);
+                System.out.println(attackResult);
 
-                // Find highest threat hostile entity (not just closest!)
-                if (AutoFaceEntity.hostileEntities == null || AutoFaceEntity.hostileEntities.isEmpty()) {
-                    System.out.println("No hostile entities to attack");
-                    completeAction(botName);
-                    break;
-                }
-
-                // ✨ INTELLIGENT TARGETING: Prioritize high-threat entities (e.g., Creeper > Zombie)
-                Entity attackTarget = selectHighestThreatTarget(bot, AutoFaceEntity.hostileEntities);
-
-                if (attackTarget == null) {
-                    System.out.println("Could not find attack target");
-                    completeAction(botName);
-                    break;
-                }
-
-                double distanceToTarget = Math.sqrt(attackTarget.distanceToSqr(bot));
-                boolean hasRangedWeapon = RangedWeaponUtils.hasBowOrCrossbow(bot);
-                boolean hasAmmo = RangedWeaponUtils.hasArrows(bot);
-
-                System.out.println("Target: " + attackTarget.getName().getString() +
-                                 " at " + String.format("%.1f", distanceToTarget) + "m");
-                System.out.println("Ranged weapon: " + hasRangedWeapon + ", Ammo: " + hasAmmo);
-
-                // Decision logic: Use ranged if available and target is far, otherwise melee
-                if (hasRangedWeapon && hasAmmo && distanceToTarget > 4.0) {
-                    // RANGED ATTACK STRATEGY
-                    System.out.println("Using RANGED attack (distance > 4m)");
-
-                    // Execute shooting command synchronously
-                    server.getCommands().performPrefixedCommand(botSource, "/bot shoot_arrow " + botName + " false");
-
-                    // Wait for shoot to complete (with timeout)
-                    waitForActionCompletion(botName, 3000); // 3 second max wait
+                if (attackResult.contains("with a ranged weapon")) {
+                    waitForActionCompletion(botName, 3000);
                 } else {
-                    // MELEE ATTACK STRATEGY
-                    System.out.println("Using MELEE attack (close range or no ranged weapon)");
-
-                    // ⚔ AUTO-EQUIP BEST MELEE WEAPON (if not already holding one)
-                    boolean weaponEquipped = net.shasankp000.PlayerUtils.WeaponUtils.equipBestMeleeWeapon(bot);
-                    if (weaponEquipped) {
-                        System.out.println("✓ Best melee weapon equipped for combat");
-                    } else {
-                        System.out.println("⚠ No melee weapon found, attacking with current item");
-                    }
-
-                    FaceClosestEntity.faceClosestEntity(bot, AutoFaceEntity.hostileEntities);
-                    server.getCommands().performPrefixedCommand(botSource, "/player " + botName + " attack");
-
-                    // Melee completes instantly
                     completeAction(botName);
                 }
                 break;

@@ -4914,6 +4914,19 @@ public class FunctionCallerV2 {
                     logger.info("Calling method: {}", functionName);
                     Tools.hit();
                 }
+                case "attackHostileMobIfSeeable" -> {
+                    logger.info("Calling method: attackHostileMobIfSeeable");
+                    if (botSource != null && botSource.getPlayer() != null) {
+                        String result = HostileMobAttackTool.attackHostileMobIfSeeable(
+                                botSource.getPlayer(),
+                                botSource.getServer(),
+                                botSource
+                        );
+                        getFunctionOutput(result);
+                    } else {
+                        getFunctionOutput("Cannot attack hostile mob: bot source is unavailable.");
+                    }
+                }
                 case "action" -> {
                     String actionName = resolvePlaceholder(paramMap.getOrDefault("action", paramMap.get("name")), state);
                     logger.info("Calling generic action: {}", actionName);
@@ -4924,6 +4937,17 @@ public class FunctionCallerV2 {
                         Tools.walk(parseDurationSeconds(resolvePlaceholder(duration, state)), direction);
                     } else if ("hit".equalsIgnoreCase(actionName) || "attack".equalsIgnoreCase(actionName)) {
                         Tools.hit();
+                    } else if ("attackHostileMobIfSeeable".equalsIgnoreCase(actionName)) {
+                        if (botSource != null && botSource.getPlayer() != null) {
+                            String result = HostileMobAttackTool.attackHostileMobIfSeeable(
+                                    botSource.getPlayer(),
+                                    botSource.getServer(),
+                                    botSource
+                            );
+                            getFunctionOutput(result);
+                        } else {
+                            getFunctionOutput("Cannot attack hostile mob: bot source is unavailable.");
+                        }
                     } else {
                         logger.warn("Unknown generic action: {}", actionName);
                         getFunctionOutput("Unknown action: " + actionName);
@@ -5625,6 +5649,7 @@ public class FunctionCallerV2 {
             // Actions with no parameters (handled by bot commands)
             case "eat":
             case "attack":
+            case "attackhostilemobifseeable":
             case "shoot":
             case "evade":
             case "retreat":

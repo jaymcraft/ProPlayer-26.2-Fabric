@@ -18,7 +18,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
@@ -308,7 +308,7 @@ public class modCommandRegistry {
                                                     List<Entity> hostileEntities = nearbyEntities.stream()
                                                             .filter(entity -> {
                                                                 // Include hostile mobs
-                                                                if (entity instanceof Monster) {
+                                                                if (entity instanceof Enemy) {
                                                                     return true;
                                                                 }
                                                                 // Include hostile players (tracked by retaliation system)
