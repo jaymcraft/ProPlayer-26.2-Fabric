@@ -3,6 +3,7 @@ package net.shasankp000;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
@@ -68,11 +69,14 @@ public class AIPlayerClient implements ClientModInitializer {
         } catch (IOException e) {
             System.out.println("Bot profiles not found yet - continuing with no bots registered.");
             botProfiles = null;
+        } catch (JsonParseException e) {
+            LOGGER.warn("Bot profiles config is malformed. Continuing with no bots registered: {}", e.getMessage());
+            botProfiles = null;
         }
     }
 
     private static JsonObject getBotProfiles() {
-        if (botProfiles == null || !botProfiles.has("botGameProfile") || botProfiles.get("botGameProfile").isJsonNull()) {
+        if (botProfiles == null || !botProfiles.has("botGameProfile") || botProfiles.get("botGameProfile").isJsonNull() || !botProfiles.get("botGameProfile").isJsonObject()) {
             return null;
         }
         return botProfiles.getAsJsonObject("botGameProfile");

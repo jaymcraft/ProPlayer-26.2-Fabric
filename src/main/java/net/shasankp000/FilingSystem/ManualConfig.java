@@ -2,6 +2,7 @@ package net.shasankp000.FilingSystem;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonParseException;
 import com.google.gson.reflect.TypeToken;
 import net.shasankp000.ServiceLLMClients.*;
 import net.shasankp000.LauncherDetection.LauncherEnvironment;
@@ -11,6 +12,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.lang.reflect.Type;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -197,6 +200,12 @@ public class ManualConfig {
             Gson gson = new Gson();
             Type type = new TypeToken<ManualConfig>(){}.getType();
             ManualConfig loadedConfig = gson.fromJson(reader, type);
+            if (loadedConfig == null) {
+                LOGGER.warn("Config file was empty. Recreating default config.");
+                ManualConfig defaultConfig = new ManualConfig();
+                defaultConfig.save();
+                return defaultConfig;
+            }
             // After loading, ensure the model list is updated.
             String currentProvider = LLMProviderConfig.getConfiguredProvider();
             loadedConfig.checkAndUpdateProvider(currentProvider);
@@ -204,6 +213,26 @@ public class ManualConfig {
         } catch (IOException e) {
             LOGGER.error("Failed to load config file. Using default config.", e);
             return new ManualConfig();
+        } catch (JsonParseException e) {
+            LOGGER.error("Config file is malformed. Backing it up and recreating defaults.", e);
+            backupMalformedConfig(file);
+            ManualConfig defaultConfig = new ManualConfig();
+            defaultConfig.save();
+            return defaultConfig;
+        }
+    }
+
+    private static void backupMalformedConfig(File file) {
+        if (!file.exists()) {
+            return;
+        }
+
+        File backup = new File(file.getParentFile(), FILE_NAME + ".malformed-" + System.currentTimeMillis() + ".bak");
+        try {
+            Files.move(file.toPath(), backup.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            LOGGER.warn("Malformed config moved to {}", backup.getAbsolutePath());
+        } catch (IOException backupError) {
+            LOGGER.error("Failed to back up malformed config file: {}", backupError.getMessage(), backupError);
         }
     }
 
