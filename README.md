@@ -19,12 +19,10 @@ I had to add that statement up there to prevent misunderstandings.
 
 This mod relies on the internal code of the Carpet mod, please star the repository of the mod: https://github.com/gnembon/fabric-carpet (Giving credit where it's due)
 
-This mod also relies on the ollama4j project. https://github.com/amithkoujalgi/ollama4j
-
 ---
 # Download links
 
-1.Modrinth https://modrinth.com/mod/ai-player-fabric-26.1-26.1.2
+1.Modrinth still waiting to be acepted
 
 # Changelog v1.0.5.2-release+1.21.1
 
