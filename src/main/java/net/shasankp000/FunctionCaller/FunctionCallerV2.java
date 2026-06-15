@@ -2315,6 +2315,91 @@ public class FunctionCallerV2 {
         return "⚠️ Tunnel step limit reached. Last mined: " + lastMineResult;
     }
 
+    private static String mineStairTunnelTowardPosition(ServerPlayer bot, BlockPos targetFeet, int maxSteps) throws Exception {
+        ServerLevel world = (ServerLevel) bot.level();
+        String lastResult = "No stair tunnel block mined yet.";
+        for (int step = 0; step < maxSteps; step++) {
+            BlockPos feet = bot.blockPosition();
+            if (feet.distManhattan(targetFeet) <= 1
+                    || (Math.abs(targetFeet.getY() - feet.getY()) <= 2
+                    && Math.sqrt(targetFeet.distToCenterSqr(bot.position())) <= 4.5)) {
+                return "✅ Reached stair tunnel position near " + targetFeet;
+            }
+
+            if (targetFeet.getY() - feet.getY() <= 2) {
+                return mineTunnelTowardPosition(bot, targetFeet, Math.max(8, maxSteps - step));
+            }
+
+            BlockPos nextFeet = chooseNextUpwardStairStep(world, feet, targetFeet);
+            if (nextFeet == null) {
+                return "⚠️ Could not find a solid upward stair step toward " + targetFeet;
+            }
+
+            for (BlockPos clearPos : List.of(nextFeet, nextFeet.above())) {
+                BlockState clearState = world.getBlockState(clearPos);
+                if (clearState.isAir() || clearState.canBeReplaced()) {
+                    continue;
+                }
+                if (!clearState.getFluidState().isEmpty()) {
+                    return "⚠️ Stair tunnel hit fluid at " + clearPos;
+                }
+                lastResult = MiningTool.mineBlock(bot, clearPos).get(20, TimeUnit.SECONDS);
+                if (lastResult.startsWith("❌") || lastResult.startsWith("⚠️")) {
+                    return lastResult;
+                }
+                Thread.sleep(250L);
+            }
+
+            Vec3 nextPosition = Vec3.atBottomCenterOf(nextFeet);
+            if (!canBotOccupy(bot, nextPosition, false)) {
+                return "⚠️ Stair tunnel step is not occupiable at " + nextFeet;
+            }
+
+            String moveResult = startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false).get(30, TimeUnit.SECONDS);
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                return moveResult;
+            }
+            lastResult = moveResult;
+        }
+
+        return "⚠️ Stair tunnel step limit reached. Last result: " + lastResult;
+    }
+
+    private static BlockPos chooseNextUpwardStairStep(ServerLevel world, BlockPos feet, BlockPos targetFeet) {
+        List<Direction> directions = new ArrayList<>();
+        int dx = targetFeet.getX() - feet.getX();
+        int dz = targetFeet.getZ() - feet.getZ();
+        if (Math.abs(dx) >= Math.abs(dz) && dx != 0) {
+            directions.add(dx > 0 ? Direction.EAST : Direction.WEST);
+        }
+        if (dz != 0) {
+            directions.add(dz > 0 ? Direction.SOUTH : Direction.NORTH);
+        }
+        for (Direction direction : List.of(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)) {
+            if (!directions.contains(direction)) {
+                directions.add(direction);
+            }
+        }
+
+        return directions.stream()
+                .map(direction -> feet.relative(direction).above())
+                .filter(nextFeet -> {
+                    BlockPos floorPos = nextFeet.below();
+                    BlockState floorState = world.getBlockState(floorPos);
+                    if (floorState.isAir()
+                            || !floorState.getFluidState().isEmpty()
+                            || !floorState.isRedstoneConductor(world, floorPos)) {
+                        return false;
+                    }
+                    BlockState feetState = world.getBlockState(nextFeet);
+                    BlockState headState = world.getBlockState(nextFeet.above());
+                    return feetState.getFluidState().isEmpty()
+                            && headState.getFluidState().isEmpty();
+                })
+                .min(Comparator.comparingInt(pos -> pos.distManhattan(targetFeet)))
+                .orElse(null);
+    }
+
     private static BlockPos nextTunnelStep(BlockPos currentFeet, BlockPos targetPos) {
         int dx = targetPos.getX() - currentFeet.getX();
         int dy = targetPos.getY() - currentFeet.getY();
@@ -2875,6 +2960,11 @@ public class FunctionCallerV2 {
             }
             logger.info("Could not directly pick up visible-flow {} source at {} via {}", label, sourcePos, directPickupResult);
 
+            String approachResult = approachVisibleFluidStream(bot, fluidBlock, sourcePos, label);
+            if (approachResult.startsWith("Moved")) {
+                return approachResult;
+            }
+
             String moveResult = moveToFluidInteractionPosition(bot, sourcePos, fluidBlock);
             if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
                 logger.info("Could not reach visible-flow {} source at {} via {}", label, sourcePos, moveResult);
@@ -2894,6 +2984,47 @@ public class FunctionCallerV2 {
         return "WAIT:I couldn't collect visible " + label + " yet.";
     }
 
+    private static String approachVisibleFluidStream(ServerPlayer bot, Block fluidBlock, BlockPos sourcePos, String label) throws Exception {
+        if (fluidBlock != Blocks.WATER || sourcePos.getY() - bot.blockPosition().getY() <= 4) {
+            return "WAIT:No visible " + label + " stream approach needed.";
+        }
+
+        for (BlockPos visibleFluidPos : findVisibleFluidBlocksConnectedToSource(bot, fluidBlock, sourcePos, 12, 24, 24).stream().limit(8).toList()) {
+            if (Math.sqrt(visibleFluidPos.distToCenterSqr(bot.position())) <= 4.5) {
+                return "Moved near visible " + label + " stream at " + visibleFluidPos + "; source is at " + sourcePos + ".";
+            }
+
+            for (BlockPos interactionPos : findInteractionPositions(bot, visibleFluidPos).stream().limit(4).toList()) {
+                if (!isSafeWaterStreamApproachPosition((ServerLevel) bot.level(), interactionPos, visibleFluidPos)) {
+                    continue;
+                }
+
+                String moveResult = moveToWaterStreamApproach(bot, interactionPos);
+                if (!moveResult.startsWith("❌") && !moveResult.startsWith("⚠️")) {
+                    return "Moved toward visible " + label + " stream at " + visibleFluidPos
+                            + "; source is at " + sourcePos + ".";
+                }
+                logger.info("Could not approach visible {} stream at {} from {} via {}",
+                        label, visibleFluidPos, interactionPos, moveResult);
+            }
+        }
+
+        return "WAIT:I saw connected " + label + ", but couldn't move into the stream area yet.";
+    }
+
+    private static String moveToWaterStreamApproach(ServerPlayer bot, BlockPos interactionPos) throws Exception {
+        if (isSafeShortFluidMove(bot, interactionPos)) {
+            try {
+                return startPreciseCoordinateMove(interactionPos.getX(), interactionPos.getY(), interactionPos.getZ(), true, false)
+                        .get(4, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                PathTracer.flushAllMovementTasks();
+                logger.warn("Timed out moving to visible water approach position {}", interactionPos);
+            }
+        }
+        return mineTunnelTowardPosition(bot, interactionPos, 48);
+    }
+
     private static String tryUseBucketOnReachableFluid(ServerPlayer bot, BlockPos sourcePos, String label) throws Exception {
         if (!isWithinPlacementRange(bot, sourcePos) && !isWithinInteractionRange(bot, sourcePos)) {
             return "❌ Too far to bucket " + label + " source at " + sourcePos;
@@ -2906,7 +3037,9 @@ public class FunctionCallerV2 {
             if (!isSafeFluidInteractionPosition((ServerLevel) bot.level(), interactionPos, sourcePos, fluidBlock)) {
                 continue;
             }
-            String positionTunnelResult = mineTunnelTowardPosition(bot, interactionPos, 64);
+            String positionTunnelResult = interactionPos.getY() - bot.blockPosition().getY() > 3
+                    ? mineStairTunnelTowardPosition(bot, interactionPos, 80)
+                    : mineTunnelTowardPosition(bot, interactionPos, 64);
             if (isWithinInteractionRange(bot, sourcePos) && canSeeBlock((ServerLevel) bot.level(), bot, sourcePos)) {
                 return positionTunnelResult;
             }
@@ -2917,7 +3050,9 @@ public class FunctionCallerV2 {
         }
 
         String fluidBlockId = BuiltInRegistries.BLOCK.getKey(fluidBlock).toString();
-        String tunnelResult = mineTunnelTowardBlock(bot, sourcePos, List.of(fluidBlockId), 96);
+        String tunnelResult = sourcePos.getY() - bot.blockPosition().getY() > 3
+                ? mineStairTunnelTowardPosition(bot, sourcePos, 96)
+                : mineTunnelTowardBlock(bot, sourcePos, List.of(fluidBlockId), 96);
         if (isWithinInteractionRange(bot, sourcePos) && canSeeBlock((ServerLevel) bot.level(), bot, sourcePos)) {
             return tunnelResult;
         }
@@ -3047,6 +3182,56 @@ public class FunctionCallerV2 {
         List<BlockPos> sortedSources = new ArrayList<>(sources);
         sortedSources.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(bot.position())));
         return sortedSources;
+    }
+
+    private static List<BlockPos> findVisibleFluidBlocksConnectedToSource(
+            ServerPlayer bot,
+            Block fluidBlock,
+            BlockPos sourcePos,
+            int horizontalRadius,
+            int verticalDown,
+            int verticalUp
+    ) {
+        ServerLevel world = (ServerLevel) bot.level();
+        BlockPos origin = bot.blockPosition();
+        List<BlockPos> matches = new ArrayList<>();
+
+        for (int dx = -horizontalRadius; dx <= horizontalRadius; dx++) {
+            for (int dz = -horizontalRadius; dz <= horizontalRadius; dz++) {
+                if (dx * dx + dz * dz > horizontalRadius * horizontalRadius) {
+                    continue;
+                }
+                for (int dy = -verticalDown; dy <= verticalUp; dy++) {
+                    BlockPos fluidPos = origin.offset(dx, dy, dz);
+                    BlockState state = world.getBlockState(fluidPos);
+                    if (!state.is(fluidBlock) || fluidPos.equals(sourcePos) || !canSeeBlock(world, bot, fluidPos)) {
+                        continue;
+                    }
+                    Optional<BlockPos> connectedSource = findConnectedFluidSource(world, fluidBlock, fluidPos);
+                    if (connectedSource.isPresent() && connectedSource.get().equals(sourcePos)) {
+                        matches.add(fluidPos);
+                    }
+                }
+            }
+        }
+
+        matches.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(bot.position())));
+        return uniqueBlockList(matches);
+    }
+
+    private static boolean isSafeWaterStreamApproachPosition(ServerLevel world, BlockPos interactionPos, BlockPos fluidPos) {
+        BlockState feetState = world.getBlockState(interactionPos);
+        BlockState headState = world.getBlockState(interactionPos.above());
+        BlockState floorState = world.getBlockState(interactionPos.below());
+        if ((!feetState.isAir() && !feetState.canBeReplaced())
+                || !feetState.getFluidState().isEmpty()
+                || (!headState.isAir() && !headState.canBeReplaced())
+                || !headState.getFluidState().isEmpty()
+                || floorState.isAir()
+                || !floorState.getFluidState().isEmpty()) {
+            return false;
+        }
+        return interactionPos.distManhattan(fluidPos) <= 3;
     }
 
     private static Optional<BlockPos> findConnectedFluidSource(ServerLevel world, Block fluidBlock, BlockPos startPos) {

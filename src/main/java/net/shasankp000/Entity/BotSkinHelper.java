@@ -2,7 +2,10 @@ package net.shasankp000.Entity;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonSyntaxException;
 import net.shasankp000.LauncherDetection.LauncherEnvironment;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -13,6 +16,7 @@ import java.nio.file.Paths;
 
 public final class BotSkinHelper {
     private static final Gson GSON = new Gson();
+    private static final Logger LOGGER = LoggerFactory.getLogger("bot-skin-helper");
     private static final Path BOT_PROFILE_PATH = Paths.get(LauncherEnvironment.getStorageDirectory("config") + File.separator + "settings.json5");
 
     private BotSkinHelper() {
@@ -36,6 +40,9 @@ public final class BotSkinHelper {
                 }
             }
         } catch (IOException ignored) {
+            return false;
+        } catch (JsonSyntaxException | IllegalStateException e) {
+            LOGGER.warn("Ignoring malformed bot profile config at {}: {}", BOT_PROFILE_PATH, e.getMessage());
             return false;
         }
 
