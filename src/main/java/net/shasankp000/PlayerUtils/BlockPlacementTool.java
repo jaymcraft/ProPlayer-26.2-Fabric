@@ -250,15 +250,17 @@ public class BlockPlacementTool {
         }
 
         if (emptyHotbarSlot == -1) {
-            // No empty hotbar slot, use slot 8 as fallback (replace whatever is there)
+            // No empty hotbar slot, use slot 8 as fallback and swap the displaced item back.
             emptyHotbarSlot = 8;
             LOGGER.info("No empty hotbar slot found, using slot 8 as fallback");
         }
 
-        // Move the stack from inventory to hotbar
+        // Move the stack from inventory to hotbar without deleting the displaced hotbar item.
         ItemStack stackToMove = bot.getInventory().getItem(inventorySlot);
+        ItemStack displacedStack = bot.getInventory().getItem(emptyHotbarSlot);
         bot.getInventory().setItem(emptyHotbarSlot, stackToMove.copy());
-        bot.getInventory().setItem(inventorySlot, ItemStack.EMPTY);
+        bot.getInventory().setItem(inventorySlot, displacedStack.copy());
+        bot.getInventory().setChanged();
 
         LOGGER.info("Moved {} from inventory slot {} to hotbar slot {}", blockType, inventorySlot, emptyHotbarSlot);
         return emptyHotbarSlot;
