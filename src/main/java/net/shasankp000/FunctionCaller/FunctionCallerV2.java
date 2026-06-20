@@ -37,6 +37,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
@@ -3898,8 +3899,19 @@ public class FunctionCallerV2 {
                     return "✅ Placed " + label + " near " + targetPos + " at " + nearbyFluid.get() + ".";
                 }
 
-                logger.info("Could not place {} into {} via support {} face {} on attempt {}/2: {}; block became {}",
-                        label, targetPos, supportPos, face, attempt, useResult,
+                String directUseResult = useFluidBucketOnSupportSync(bot, supportPos, face, bucketItem, label + " into " + targetPos);
+                Thread.sleep(250L);
+                afterState = world.getBlockState(targetPos);
+                if (afterState.is(expectedFluidBlock) || afterState.is(Blocks.OBSIDIAN)) {
+                    return "✅ Placed " + label + " into " + targetPos + ".";
+                }
+                nearbyFluid = findPlacedFluidNear(world, targetPos, expectedFluidBlock, 2);
+                if (nearbyFluid.isPresent()) {
+                    return "✅ Placed " + label + " near " + targetPos + " at " + nearbyFluid.get() + ".";
+                }
+
+                logger.info("Could not place {} into {} via support {} face {} on attempt {}/2: {}; direct fallback: {}; block became {}",
+                        label, targetPos, supportPos, face, attempt, useResult, directUseResult,
                         BuiltInRegistries.BLOCK.getKey(afterState.getBlock()));
                 if (!hasItemByPath(bot.getInventory(), itemId(bucketItem).getPath())) {
                     break;
@@ -3909,6 +3921,40 @@ public class FunctionCallerV2 {
         }
 
         return "❌ No usable adjacent block face to place " + label + " into " + targetPos;
+    }
+
+    private static String useFluidBucketOnSupportSync(
+            ServerPlayer bot,
+            BlockPos supportPos,
+            Direction face,
+            Item bucketItem,
+            String label
+    ) throws Exception {
+        CompletableFuture<String> future = new CompletableFuture<>();
+        botSource.getServer().execute(() -> {
+            try {
+                int slot = ensureItemInHotbar(bot, bucketItem);
+                if (slot < 0) {
+                    future.complete("❌ Missing " + itemId(bucketItem) + " for " + label);
+                    return;
+                }
+                bot.getInventory().setSelectedSlot(slot);
+                LookController.faceBlock(bot, supportPos);
+                Vec3 hitVec = Vec3.atCenterOf(supportPos).add(
+                        face.getStepX() * 0.5,
+                        face.getStepY() * 0.5,
+                        face.getStepZ() * 0.5
+                );
+                BlockHitResult hitResult = new BlockHitResult(hitVec, face, supportPos, false);
+                ItemStack handStack = bot.getItemInHand(InteractionHand.MAIN_HAND);
+                handStack.useOn(new UseOnContext(bot, InteractionHand.MAIN_HAND, hitResult));
+                bot.getInventory().setChanged();
+                future.complete("✅ Directly used " + itemId(bucketItem) + " for " + label);
+            } catch (Exception e) {
+                future.complete("❌ Could not directly use fluid bucket for " + label + ": " + e.getMessage());
+            }
+        });
+        return future.get(10, TimeUnit.SECONDS);
     }
 
     private static Optional<BlockPos> findPlacedFluidNear(ServerLevel world, BlockPos targetPos, Block expectedFluidBlock, int radius) {
