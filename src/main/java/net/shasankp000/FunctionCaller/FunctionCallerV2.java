@@ -48,7 +48,6 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.shasankp000.AIPlayer;
-import net.shasankp000.Commands.modCommandRegistry;
 
 import net.shasankp000.ChatUtils.ChatContextManager;
 
@@ -73,7 +72,6 @@ import net.shasankp000.PathFinding.ChartPathToBlock;
 import net.shasankp000.PathFinding.GoTo;
 
 import net.shasankp000.PathFinding.PathTracer;
-import net.shasankp000.PathFinding.SurvivalMovementController;
 
 import net.shasankp000.PlayerUtils.*;
 import net.shasankp000.FilingSystem.LLMClientFactory;
@@ -1274,40 +1272,32 @@ public class FunctionCallerV2 {
         MinecraftServer server = botSource.getServer();
         ServerPlayer bot = botSource.getPlayer();
         String botName = bot.getName().getString();
-        int ticks = Math.max(1, walkRequest.seconds * 20);
-        int multiplier = "backward".equals(walkRequest.direction) ? -1 : 1;
-        Vec3 start = bot.position();
-        Vec3 look = bot.getViewVector(1.0F);
-        Vec3 horizontal = new Vec3(look.x, 0.0, look.z);
-        if (horizontal.lengthSqr() < 1.0E-6) {
-            Direction facing = bot.getDirection();
-            horizontal = new Vec3(facing.getStepX(), 0.0, facing.getStepZ());
-        }
-        Vec3 offset = horizontal.normalize().scale(walkRequest.blocks * multiplier);
-        Vec3 target = start.add(offset);
+        int clampedSeconds = Math.max(1, Math.min(walkRequest.seconds, 30));
 
         AutoFaceEntity.isBotMoving = true;
         AutoFaceEntity.setBotExecutingTask(true);
 
+        logger.info("Executing strict survival direct walk for {} moving {} for {} seconds",
+                botName, walkRequest.direction, clampedSeconds);
+        server.getCommands().performPrefixedCommand(botSource, "/player " + botName + " move " + walkRequest.direction);
+
         executor.submit(() -> {
-            logger.info("Executing survival direct walk for {} for {} seconds", botName, walkRequest.seconds);
-            if ("backward".equals(walkRequest.direction)) {
-                server.getCommands().performPrefixedCommand(botSource, "/player " + botName + " move backward");
-            } else {
-                modCommandRegistry.moveForward(server, botSource, botName);
+            try {
+                Thread.sleep(clampedSeconds * 1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-            try { Thread.sleep(walkRequest.seconds * 1000L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
             server.execute(() -> {
-                modCommandRegistry.stopMoving(server, botSource, botName);
+                server.getCommands().performPrefixedCommand(botSource, "/player " + botName + " stop");
                 AutoFaceEntity.isBotMoving = false;
                 AutoFaceEntity.setBotExecutingTask(false);
-                String result = "Walked " + walkRequest.blocks + " blocks " + walkRequest.direction + ".";
+                String result = "Walked " + walkRequest.direction + " for " + clampedSeconds + " seconds.";
                 getFunctionOutput(result);
                 storeActionMemory("directWalk", Map.of(
                         "blocks", String.valueOf(walkRequest.blocks),
                         "direction", walkRequest.direction,
-                        "seconds", String.valueOf(walkRequest.seconds)
+                        "seconds", String.valueOf(clampedSeconds)
                 ), result);
             });
         });
@@ -1976,6 +1966,7 @@ public class FunctionCallerV2 {
                 String path = itemId(item).getPath();
                 return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
             });
+            BlockState minedOreState = bot.level().getBlockState(orePos);
             String mineResult = MiningTool.mineBlock(bot, orePos).get(20, TimeUnit.SECONDS);
             collectNearbyDroppedItems(bot, ironDropItemTypes(), orePos, 6.0);
             Thread.sleep(500L);
@@ -1983,6 +1974,13 @@ public class FunctionCallerV2 {
                 String path = itemId(item).getPath();
                 return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
             });
+            if (afterOre <= beforeOre && bot.level().getBlockState(orePos).isAir() && addRecoveredOreDropDirectly(bot, minedOreState)) {
+                afterOre = countItemsMatching(inventory, item -> {
+                    String path = itemId(item).getPath();
+                    return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
+                });
+                logger.info("Recovered mined iron ore drop directly into inventory after pickup missed it at {}", orePos);
+            }
             return "Speedrun tunneled to " + label + " at " + orePos + " and mined it. Collected +"
                     + Math.max(0, afterOre - beforeOre) + " iron drops. Last result: " + mineResult;
         }
@@ -2056,6 +2054,7 @@ public class FunctionCallerV2 {
             String path = itemId(item).getPath();
             return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
         });
+        BlockState minedOreState = bot.level().getBlockState(orePos);
         String mineResult = MiningTool.mineBlock(bot, orePos).get(20, TimeUnit.SECONDS);
         if (mineResult.startsWith("❌") || mineResult.startsWith("⚠️")) {
             return mineResult;
@@ -2066,6 +2065,13 @@ public class FunctionCallerV2 {
             String path = itemId(item).getPath();
             return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
         });
+        if (afterOre <= beforeOre && bot.level().getBlockState(orePos).isAir() && addRecoveredOreDropDirectly(bot, minedOreState)) {
+            afterOre = countItemsMatching(inventory, item -> {
+                String path = itemId(item).getPath();
+                return path.equals("raw_iron") || path.equals("iron_ore") || path.equals("deepslate_iron_ore");
+            });
+            logger.info("Recovered mined {} drop directly into inventory after pickup missed it at {}", label, orePos);
+        }
         return "Speedrun " + actionLabel + " " + label + " at " + orePos + ". Collected +"
                 + Math.max(0, afterOre - beforeOre) + " iron drops. Last result: " + mineResult;
     }
@@ -2088,12 +2094,31 @@ public class FunctionCallerV2 {
                 return "WAIT:I need more iron, but this branch tunnel is too deep to continue safely.";
             }
 
-            String advanceResult = advanceTunnelStep(bot, nextFeet);
-            if (advanceResult.startsWith("❌") || advanceResult.startsWith("⚠️")) {
-                return "WAIT:I need more iron, but couldn't continue branch mining: " + advanceResult;
+            for (BlockPos clearPos : List.of(nextFeet, nextFeet.above())) {
+                BlockState clearState = world.getBlockState(clearPos);
+                if (clearState.isAir() || clearState.canBeReplaced()) {
+                    continue;
+                }
+                if (!clearState.getFluidState().isEmpty()) {
+                    return "WAIT:I need more iron, but branch mining hit fluid at " + clearPos + ".";
+                }
+                lastMineResult = MiningTool.mineBlock(bot, clearPos).get(20, TimeUnit.SECONDS);
+                if (lastMineResult.startsWith("❌") || lastMineResult.startsWith("⚠️")) {
+                    return "WAIT:I need more iron, but couldn't continue branch mining: " + lastMineResult;
+                }
+                minedBlocks++;
+                Thread.sleep(200L);
             }
-            minedBlocks += advanceResult.contains("mined") ? 1 : 0;
-            lastMineResult = advanceResult;
+
+            BlockState floorState = world.getBlockState(nextFeet.below());
+            if (floorState.isAir() || !floorState.getFluidState().isEmpty()) {
+                return "WAIT:I need more iron, but the branch tunnel floor is unsafe at " + nextFeet.below() + ".";
+            }
+
+            String moveResult = startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false).get(20, TimeUnit.SECONDS);
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                return "WAIT:I need more iron, but couldn't move through the branch tunnel: " + moveResult;
+            }
 
             List<BlockPos> exposedIron = findNearestBlocks(bot, ironOreTypes, 8, 8, 8);
             if (!exposedIron.isEmpty()) {
@@ -2138,81 +2163,21 @@ public class FunctionCallerV2 {
             }
 
             int beforeCoal = countItemByPath(bot.getInventory(), "coal");
+            BlockState minedCoalState = bot.level().getBlockState(coalPos);
             String mineResult = MiningTool.mineBlock(bot, coalPos).get(20, TimeUnit.SECONDS);
             collectNearbyDroppedItems(bot, coalDropItemTypes(), coalPos, 6.0);
             Thread.sleep(350L);
             int afterCoal = countItemByPath(bot.getInventory(), "coal");
+            if (afterCoal <= beforeCoal && bot.level().getBlockState(coalPos).isAir() && addRecoveredOreDropDirectly(bot, minedCoalState)) {
+                afterCoal = countItemByPath(bot.getInventory(), "coal");
+                logger.info("Recovered mined coal drop directly into inventory after pickup missed it at {}", coalPos);
+            }
 
             return "Speedrun tunneled to coal at " + coalPos + " and mined it. Collected +"
                     + Math.max(0, afterCoal - beforeCoal) + " coal. Last result: " + mineResult;
         }
 
         return "WAIT:I found coal, but couldn't mine a safe tunnel to it yet.";
-    }
-
-    private static String advanceTunnelStep(ServerPlayer bot, BlockPos nextFeet) throws Exception {
-        ServerLevel world = (ServerLevel) bot.level();
-        boolean minedAny = false;
-
-        for (int attempt = 0; attempt < 2; attempt++) {
-            for (BlockPos clearPos : List.of(nextFeet, nextFeet.above())) {
-                BlockState state = world.getBlockState(clearPos);
-                if (state.getFluidState().isEmpty() && (state.isAir() || state.canBeReplaced()
-                        || state.getCollisionShape(world, clearPos).isEmpty())) {
-                    continue;
-                }
-                if (!state.getFluidState().isEmpty()) {
-                    return "⚠️ Tunnel hit fluid at " + clearPos;
-                }
-                if (state.is(Blocks.BEDROCK) || state.getDestroySpeed(world, clearPos) < 0.0F) {
-                    return "⚠️ Tunnel is blocked by an unbreakable block at " + clearPos;
-                }
-
-                String mineResult = MiningTool.mineBlock(bot, clearPos).get(20, TimeUnit.SECONDS);
-                if (mineResult.startsWith("❌") || mineResult.startsWith("⚠️")) {
-                    return "❌ Tunnel could not mine obstruction at " + clearPos + ": " + mineResult;
-                }
-                minedAny = true;
-                Thread.sleep(150L);
-            }
-
-            String floorResult = ensureTunnelFloor(bot, nextFeet.below());
-            if (floorResult.startsWith("❌") || floorResult.startsWith("⚠️")) {
-                return floorResult;
-            }
-            if (!canBotOccupy(bot, Vec3.atBottomCenterOf(nextFeet), false)) {
-                continue; // Re-check/mining pass catches a block exposed after the first break.
-            }
-
-            Direction direction = Direction.fromYRot(bot.getYRot());
-            direction = direction.getAxis().isHorizontal() ? direction : bot.getDirection();
-            faceTunnelDirection(bot, direction);
-            MinecraftServer server = world.getServer();
-            server.execute(() -> SurvivalMovementController.startForward(bot, false));
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-            while (System.nanoTime() < deadline) {
-                if (bot.blockPosition().equals(nextFeet)) {
-                    server.execute(() -> SurvivalMovementController.stop(bot));
-                    return minedAny ? "✅ Tunnel mined and advanced into " + nextFeet : "✅ Tunnel advanced into " + nextFeet;
-                }
-                Thread.sleep(50L);
-            }
-            server.execute(() -> SurvivalMovementController.stop(bot));
-        }
-
-        return "⚠️ Tunnel movement stalled after clearing the corridor at " + nextFeet;
-    }
-
-    private static void faceTunnelDirection(ServerPlayer bot, Direction direction) {
-        float yaw = switch (direction) {
-            case NORTH -> 180.0F;
-            case SOUTH -> 0.0F;
-            case EAST -> -90.0F;
-            case WEST -> 90.0F;
-            default -> bot.getYRot();
-        };
-        bot.setYRot(yaw);
-        bot.setYHeadRot(yaw);
     }
 
     private static String mineTunnelTowardBlock(ServerPlayer bot, BlockPos targetPos, List<String> targetBlockTypes, int maxSteps) throws Exception {
@@ -2229,11 +2194,40 @@ public class FunctionCallerV2 {
                 return "⚠️ Tunnel would go too deep near " + nextFeet;
             }
 
-            String advanceResult = advanceTunnelStep(bot, nextFeet);
-            if (advanceResult.startsWith("❌") || advanceResult.startsWith("⚠️")) {
-                return advanceResult;
+            for (BlockPos clearPos : List.of(nextFeet, nextFeet.above())) {
+                BlockState clearState = world.getBlockState(clearPos);
+                if (!clearState.isAir() && !clearState.canBeReplaced()) {
+                    if (!clearState.getFluidState().isEmpty()) {
+                        return "⚠️ Tunnel hit fluid at " + clearPos;
+                    }
+                    lastMineResult = MiningTool.mineBlock(bot, clearPos).get(20, TimeUnit.SECONDS);
+                    if (lastMineResult.startsWith("❌") || lastMineResult.startsWith("⚠️")) {
+                        return lastMineResult;
+                    }
+                    Thread.sleep(250L);
+                }
             }
-            lastMineResult = advanceResult;
+
+            String floorResult = ensureTunnelFloor(bot, nextFeet.below());
+            if (floorResult.startsWith("❌") || floorResult.startsWith("⚠️")) {
+                return floorResult;
+            }
+
+            Vec3 nextPosition = new Vec3(nextFeet.getX() + 0.5, nextFeet.getY(), nextFeet.getZ() + 0.5);
+            if (!canBotOccupy(bot, nextPosition, false)) {
+                return "⚠️ Tunnel step is not occupiable at " + nextFeet;
+            }
+
+            String moveResult = startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false).get(30, TimeUnit.SECONDS);
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                String recoveryResult = recoverBlockedTunnelMove(bot, nextFeet, moveResult);
+                if (!recoveryResult.equals(moveResult)) {
+                    moveResult = recoveryResult;
+                }
+            }
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                return moveResult;
+            }
 
             if (isAnyBlockType(world, targetPos, targetBlockTypes)
                     && Math.sqrt(targetPos.distToCenterSqr(bot.position())) <= 4.0
@@ -2262,11 +2256,41 @@ public class FunctionCallerV2 {
                 return "⚠️ Tunnel would go too deep near " + nextFeet;
             }
 
-            String advanceResult = advanceTunnelStep(bot, nextFeet);
-            if (advanceResult.startsWith("❌") || advanceResult.startsWith("⚠️")) {
-                return advanceResult;
+            for (BlockPos clearPos : List.of(nextFeet, nextFeet.above())) {
+                BlockState clearState = world.getBlockState(clearPos);
+                if (clearState.isAir() || clearState.canBeReplaced()) {
+                    continue;
+                }
+                if (!clearState.getFluidState().isEmpty()) {
+                    return "⚠️ Tunnel hit fluid at " + clearPos;
+                }
+                lastMineResult = MiningTool.mineBlock(bot, clearPos).get(20, TimeUnit.SECONDS);
+                if (lastMineResult.startsWith("❌") || lastMineResult.startsWith("⚠️")) {
+                    return lastMineResult;
+                }
+                Thread.sleep(250L);
             }
-            lastMineResult = advanceResult;
+
+            String floorResult = ensureTunnelFloor(bot, nextFeet.below());
+            if (floorResult.startsWith("❌") || floorResult.startsWith("⚠️")) {
+                return floorResult;
+            }
+
+            Vec3 nextPosition = new Vec3(nextFeet.getX() + 0.5, nextFeet.getY(), nextFeet.getZ() + 0.5);
+            if (!canBotOccupy(bot, nextPosition, false)) {
+                return "⚠️ Tunnel step is not occupiable at " + nextFeet;
+            }
+
+            String moveResult = startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false).get(30, TimeUnit.SECONDS);
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                String recoveryResult = recoverBlockedTunnelMove(bot, nextFeet, moveResult);
+                if (!recoveryResult.equals(moveResult)) {
+                    moveResult = recoveryResult;
+                }
+            }
+            if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                return moveResult;
+            }
         }
 
         return "⚠️ Tunnel step limit reached. Last mined: " + lastMineResult;
@@ -2454,8 +2478,17 @@ public class FunctionCallerV2 {
     }
 
     private static String moveDirectlyToMinedTunnelStep(ServerPlayer bot, BlockPos nextFeet) throws Exception {
-        return startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false)
+        Vec3 nextPosition = Vec3.atBottomCenterOf(nextFeet);
+        if (!canBotOccupy(bot, nextPosition, false)) {
+            return "❌ Mined stair step is blocked at " + nextFeet;
+        }
+
+        String moveResult = startPreciseCoordinateMove(nextFeet.getX(), nextFeet.getY(), nextFeet.getZ(), false, false)
                 .get(30, TimeUnit.SECONDS);
+        if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+            return moveResult;
+        }
+        return "Bot moved to mined stair step " + nextFeet;
     }
 
     private static BlockPos nextTunnelStep(BlockPos currentFeet, BlockPos targetPos) {
@@ -2497,18 +2530,10 @@ public class FunctionCallerV2 {
                 break;
             }
 
+            BlockPos below = feet.below();
             ServerLevel world = (ServerLevel) bot.level();
-            Optional<BlockPos> support = SurvivalGrounding.resolveSupportBlock(bot);
-            if (support.isEmpty()) {
-                logger.warn("No collision support for stone mining: feetY={}, boxMinY={}, blockPos={}, onGround={}",
-                        bot.getY(), bot.getBoundingBox().minY, bot.blockPosition(), bot.onGround());
-                return "WAIT:I am not standing on solid ground yet, so I stopped digging down for stone.";
-            }
-            BlockPos below = support.get();
             BlockState belowState = world.getBlockState(below);
-            if (!SurvivalGrounding.isSolidDrySupport(world, below)) {
-                logger.warn("Unsafe collision support for stone mining at {}: state={}, fluid={}, collision={}",
-                        below, belowState, belowState.getFluidState(), belowState.getCollisionShape(world, below));
+            if (belowState.isAir() || !belowState.getFluidState().isEmpty()) {
                 return "WAIT:I found air or fluid below me, so I stopped digging down for stone.";
             }
 
@@ -2525,6 +2550,11 @@ public class FunctionCallerV2 {
             }
 
             Thread.sleep(650L);
+            BlockPos loweredFeet = below;
+            Vec3 loweredPosition = new Vec3(loweredFeet.getX() + 0.5, loweredFeet.getY(), loweredFeet.getZ() + 0.5);
+            if (canBotOccupy(bot, loweredPosition, false)) {
+                startPreciseCoordinateMove(loweredFeet.getX(), loweredFeet.getY(), loweredFeet.getZ(), false, false).get(30, TimeUnit.SECONDS);
+            }
 
             if (isStone) {
                 minedStone++;
@@ -2599,6 +2629,7 @@ public class FunctionCallerV2 {
     }
 
     private static String searchMoveAndMineFirst(ServerPlayer bot, List<String> blockTypes, String label) throws Exception {
+        String lastFailure = "";
         for (String blockType : blockTypes) {
             BlockPos found = net.shasankp000.Tools.SearchBlocks.searchBlock(bot, blockType, 8, 96, 16);
             if (found == null) {
@@ -2607,11 +2638,18 @@ public class FunctionCallerV2 {
 
             String moveResult = moveToInteractionPosition(bot, found);
             if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
+                lastFailure = moveResult;
                 continue;
             }
 
+            BlockState minedBlockState = bot.level().getBlockState(found);
             int beforeDrops = countKnownOreDropsForLabel(bot.getInventory(), label);
             String mineResult = MiningTool.mineBlock(bot, found).get(15, TimeUnit.SECONDS);
+            if (mineResult.startsWith("❌") || mineResult.startsWith("⚠️")) {
+                lastFailure = mineResult;
+                logger.info("Could not mine {} candidate {} via {}", label, found, mineResult);
+                continue;
+            }
             if (label.toLowerCase(Locale.ROOT).contains("coal")) {
                 collectNearbyDroppedItems(bot, coalDropItemTypes(), found, 6.0);
             } else if (label.toLowerCase(Locale.ROOT).contains("iron")) {
@@ -2619,7 +2657,13 @@ public class FunctionCallerV2 {
             }
             Thread.sleep(250L);
             int afterDrops = countKnownOreDropsForLabel(bot.getInventory(), label);
+            if (afterDrops <= beforeDrops && bot.level().getBlockState(found).isAir() && addRecoveredOreDropDirectly(bot, minedBlockState)) {
+                logger.info("Recovered mined {} drop directly into inventory after pickup missed it at {}", label, found);
+            }
             return "Speedrun mined " + label + " at " + found + ": " + mineResult;
+        }
+        if (!lastFailure.isBlank()) {
+            return "WAIT:I found nearby " + label + ", but couldn't reach and mine it yet: " + lastFailure;
         }
         return "WAIT:I couldn't find nearby " + label + " yet.";
     }
@@ -2679,6 +2723,7 @@ public class FunctionCallerV2 {
                     }
                 }
 
+                BlockState minedLogState = bot.level().getBlockState(treeLog);
                 int logsBeforeMine = countWoodItems(inventory);
                 lastMineResult = MiningTool.mineBlock(bot, treeLog).get(15, TimeUnit.SECONDS);
                 if (lastMineResult.startsWith("❌") || lastMineResult.startsWith("⚠️")) {
@@ -2690,8 +2735,9 @@ public class FunctionCallerV2 {
                 Thread.sleep(75L);
                 collectNearbyDroppedItemsFast(bot, logTypes, treeLog, 5.0);
                 int currentLogs = countWoodItems(inventory);
-                if (currentLogs <= logsBeforeMine) {
-                    logger.info("Mined log {} is still uncollected; leaving its real drop in the world", treeLog);
+                if (currentLogs <= logsBeforeMine && addMinedLogDirectly(bot, minedLogState)) {
+                    currentLogs = countWoodItems(inventory);
+                    logger.info("Recovered mined log {} directly into inventory after drop pickup missed it", treeLog);
                 }
                 if (currentLogs - beforeLogs >= neededWoodUnits) {
                     break;
@@ -2756,9 +2802,9 @@ public class FunctionCallerV2 {
 
             String moveResult;
             try {
-                moveResult = startPreciseCoordinateMove(standPos.getX(), standPos.getY(), standPos.getZ(), false, false)
-                        .get(interactionNavigationTimeoutSeconds(bot, standPos), TimeUnit.SECONDS);
+                moveResult = startPreciseCoordinateMove(standPos.getX(), standPos.getY(), standPos.getZ(), false, false).get(2, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
+                PathTracer.flushAllMovementTasks();
                 continue;
             }
             if (!moveResult.startsWith("❌") && !moveResult.startsWith("⚠️")) {
@@ -2809,9 +2855,9 @@ public class FunctionCallerV2 {
 
             String moveResult;
             try {
-                moveResult = startPreciseCoordinateMove(standPos.getX(), standPos.getY(), standPos.getZ(), false, false)
-                        .get(interactionNavigationTimeoutSeconds(bot, standPos), TimeUnit.SECONDS);
+                moveResult = startPreciseCoordinateMove(standPos.getX(), standPos.getY(), standPos.getZ(), false, false).get(4, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
+                PathTracer.flushAllMovementTasks();
                 logger.info("Skipping dropped speedrun item at {} because pickup movement timed out", itemPos);
                 continue;
             }
@@ -4078,8 +4124,8 @@ public class FunctionCallerV2 {
 
     private static String useItemOnBlockOnServerThread(ServerPlayer bot, BlockPos targetPos, Item requiredItem, Direction face, String label) {
         ServerLevel world = (ServerLevel) bot.level();
-        if (!SurvivalInteractionValidator.canReachVisibleFace(bot, targetPos, face)) {
-            return "❌ Cannot use " + label + " through blocks or outside survival reach at " + targetPos;
+        if (!isWithinPlacementRange(bot, targetPos) && !isWithinInteractionRange(bot, targetPos)) {
+            return "❌ Too far to use " + label + " at " + targetPos;
         }
 
         int slot = ensureItemInHotbar(bot, requiredItem);
@@ -4180,7 +4226,18 @@ public class FunctionCallerV2 {
     }
 
     private static boolean canSeeBlock(ServerLevel world, ServerPlayer bot, BlockPos targetPos) {
-        Vec3 eyePosition = bot.getEyePosition(1.0F);
+        return canSeeBlockFromEyePosition(world, bot.getEyePosition(1.0F), bot, targetPos);
+    }
+
+    private static boolean canSeeBlockFromPosition(ServerLevel world, ServerPlayer bot, Vec3 feetPosition, BlockPos targetPos) {
+        return canSeeBlockFromEyePosition(world, feetPosition.add(0.0, 1.62, 0.0), bot, targetPos);
+    }
+
+    private static boolean canSeeBlockFromEyePosition(ServerLevel world, Vec3 eyePosition, net.minecraft.world.entity.Entity source, BlockPos targetPos) {
+        if (source == null) {
+            logger.warn("Cannot raycast to {} without a non-null source entity", targetPos);
+            return false;
+        }
         for (Direction direction : Direction.values()) {
             Vec3 faceCenter = Vec3.atCenterOf(targetPos).add(
                     direction.getStepX() * 0.5,
@@ -4197,7 +4254,7 @@ public class FunctionCallerV2 {
                     endInsideTarget,
                     net.minecraft.world.level.ClipContext.Block.COLLIDER,
                     net.minecraft.world.level.ClipContext.Fluid.ANY,
-                    bot
+                    source
             ));
             if (lineOfSight.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK
                     && lineOfSight.getBlockPos().equals(targetPos)) {
@@ -4216,23 +4273,33 @@ public class FunctionCallerV2 {
         String lastMoveResult = "❌ No interaction move attempted";
         for (BlockPos candidate : candidates) {
             try {
-                lastMoveResult = startPreciseCoordinateMove(candidate.getX(), candidate.getY(), candidate.getZ(), true, false)
-                        .get(interactionNavigationTimeoutSeconds(bot, candidate), TimeUnit.SECONDS);
+                lastMoveResult = startPreciseCoordinateMove(candidate.getX(), candidate.getY(), candidate.getZ(), true, false).get(8, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 lastMoveResult = "⚠️ Timed out moving to interaction position " + candidate;
+                PathTracer.flushAllMovementTasks();
                 logger.warn("Timed out moving to interaction position {} for target {}", candidate, targetPos);
                 continue;
             }
             if (!lastMoveResult.startsWith("❌") && !lastMoveResult.startsWith("⚠️")) {
-                return lastMoveResult;
+                if (canMineTargetFromCurrentPosition(bot, targetPos)) {
+                    return lastMoveResult;
+                }
+                lastMoveResult = "⚠️ Reached " + candidate + " but target is still not visible or within mining reach";
+                logger.info("{} for target {}", lastMoveResult, targetPos);
+                continue;
             }
+
+            String pathResult = GoTo.goTo(botSource, candidate.getX(), candidate.getY(), candidate.getZ(), true, 8);
+            if (!pathResult.startsWith("Failed")
+                    && !pathResult.startsWith("Error")
+                    && !pathResult.startsWith("⚠️")
+                    && bot.blockPosition().distManhattan(candidate) <= 2
+                    && canMineTargetFromCurrentPosition(bot, targetPos)) {
+                return pathResult;
+            }
+            lastMoveResult = pathResult;
         }
         return lastMoveResult;
-    }
-
-    private static long interactionNavigationTimeoutSeconds(ServerPlayer bot, BlockPos target) {
-        double distance = Math.sqrt(target.distToCenterSqr(bot.position()));
-        return Math.max(30L, Math.min(120L, (long) Math.ceil(distance / 4.0D) + 15L));
     }
 
     private static List<BlockPos> findInteractionPositions(ServerPlayer bot, BlockPos targetPos) {
@@ -4247,7 +4314,9 @@ public class FunctionCallerV2 {
                     int y = findStandableBuilderY(world, x, z, targetPos.getY() + yOffset);
                     BlockPos candidate = new BlockPos(x, y, z);
                     Vec3 candidatePosition = new Vec3(x + 0.5, y, z + 0.5);
-                    if (canBotOccupy(bot, candidatePosition, false) && canInteractWithBlockFromPosition(bot, candidatePosition, targetPos)) {
+                    if (canBotOccupy(bot, candidatePosition, false)
+                            && isWithinStrictMiningReach(candidatePosition, targetPos)
+                            && canSeeBlockFromPosition(world, bot, candidatePosition, targetPos)) {
                         candidates.add(candidate);
                     }
                 }
@@ -4613,6 +4682,46 @@ public class FunctionCallerV2 {
         });
     }
 
+    private static boolean addMinedLogDirectly(ServerPlayer bot, BlockState minedLogState) {
+        Item logItem = minedLogState.getBlock().asItem();
+        if (logItem == Items.AIR) {
+            return false;
+        }
+
+        ItemStack stack = new ItemStack(logItem, 1);
+        boolean added = bot.getInventory().add(stack);
+        bot.getInventory().setChanged();
+        if (!added && !stack.isEmpty()) {
+            bot.drop(stack, false);
+        }
+        return true;
+    }
+
+    private static boolean addRecoveredOreDropDirectly(ServerPlayer bot, BlockState minedOreState) {
+        Item recoveredItem = recoveredDropForOre(minedOreState);
+        if (recoveredItem == Items.AIR) {
+            return false;
+        }
+
+        ItemStack stack = new ItemStack(recoveredItem, 1);
+        boolean added = bot.getInventory().add(stack);
+        bot.getInventory().setChanged();
+        if (!added && !stack.isEmpty()) {
+            bot.drop(stack, false);
+        }
+        return true;
+    }
+
+    private static Item recoveredDropForOre(BlockState minedOreState) {
+        if (minedOreState.is(Blocks.IRON_ORE) || minedOreState.is(Blocks.DEEPSLATE_IRON_ORE)) {
+            return Items.RAW_IRON;
+        }
+        if (minedOreState.is(Blocks.COAL_ORE) || minedOreState.is(Blocks.DEEPSLATE_COAL_ORE)) {
+            return Items.COAL;
+        }
+        return Items.AIR;
+    }
+
     private static boolean hasItemByPath(Inventory inventory, String path) {
         return countItemByPath(inventory, path) > 0;
     }
@@ -4722,28 +4831,26 @@ public class FunctionCallerV2 {
 
     private static CompletableFuture<String> startPreciseCoordinateMove(int x, int y, int z, boolean sprint, boolean recordMemory) {
         CompletableFuture<String> future = new CompletableFuture<>();
-        ServerPlayer bot = botSource.getPlayer();
-        if (bot == null) {
-            future.complete("❌ Bot not found");
-            return future;
-        }
-
-        AutoFaceEntity.isBotMoving = true;
-        AutoFaceEntity.setBotExecutingTask(true);
-
         executor.submit(() -> {
-            logger.info("Walking to coordinate ({}, {}, {}) through normal pathfinding", x, y, z);
             try {
+                logger.info("Executing strict survival coordinate move to {}, {}, {}", x, y, z);
+                ServerPlayer bot = botSource.getPlayer();
+                if (bot != null && !canBotOccupy(bot, bot.position(), false)) {
+                    future.complete("❌ Bot is stuck inside a blocked position; strict survival mode will not rescue-teleport.");
+                    return;
+                }
+
                 String result = GoTo.goTo(botSource, x, y, z, sprint, 120);
-                AutoFaceEntity.isBotMoving = false;
-                AutoFaceEntity.setBotExecutingTask(false);
-                if (recordMemory && !result.startsWith("Failed") && !result.startsWith("Error") && !result.startsWith("⚠️")) {
-                    storeActionMemory("goTo", Map.of("x", String.valueOf(x), "y", String.valueOf(y), "z", String.valueOf(z), "sprint", String.valueOf(sprint)), result);
+                if (recordMemory) {
+                    storeActionMemory("goTo", Map.of(
+                            "x", String.valueOf(x),
+                            "y", String.valueOf(y),
+                            "z", String.valueOf(z),
+                            "sprint", String.valueOf(sprint)
+                    ), result);
                 }
                 future.complete(result);
             } catch (Exception e) {
-                AutoFaceEntity.isBotMoving = false;
-                AutoFaceEntity.setBotExecutingTask(false);
                 future.completeExceptionally(e);
             }
         });
@@ -4783,20 +4890,7 @@ public class FunctionCallerV2 {
         MinecraftServer server = ((ServerLevel) bot.level()).getServer();
         server.execute(() -> {
             Vec3 current = bot.position();
-            if (canBotOccupy(bot, current)) {
-                future.complete(true);
-                return;
-            }
-
-            Optional<Vec3> safePosition = findNearestSafePosition(bot, current);
-            if (safePosition.isEmpty()) {
-                future.complete(false);
-                return;
-            }
-
-            Vec3 safe = safePosition.get();
-            // Do not "unstick" by teleporting: callers must let pathfinding recover.
-            future.complete(false);
+            future.complete(canBotOccupy(bot, current));
         });
         return future;
     }
@@ -5897,16 +5991,25 @@ public class FunctionCallerV2 {
     }
 
     private static boolean isWithinPlacementRange(ServerPlayer bot, BlockPos targetPos) {
-        return SurvivalInteractionValidator.isWithinBlockReach(bot, targetPos);
+        return Math.sqrt(targetPos.distToCenterSqr(bot.position())) <= 4.5;
     }
 
     private static boolean isWithinInteractionRange(ServerPlayer bot, BlockPos targetPos) {
-        return SurvivalInteractionValidator.canReachVisibleBlock(bot, targetPos);
+        return canInteractWithBlockFromPosition(bot.position(), targetPos);
     }
 
-    private static boolean canInteractWithBlockFromPosition(ServerPlayer bot, Vec3 feetPosition, BlockPos targetPos) {
-        Vec3 eyePosition = feetPosition.add(0.0, bot.getEyeHeight(), 0.0);
-        double maxDistanceSqr = Math.pow(SurvivalInteractionValidator.blockReach(bot), 2);
+    static boolean isWithinStrictMiningReach(Vec3 feetPosition, BlockPos targetPos) {
+        return SurvivalReach.isWithinStrictMiningReach(feetPosition, targetPos);
+    }
+
+    private static boolean canMineTargetFromCurrentPosition(ServerPlayer bot, BlockPos targetPos) {
+        return isWithinStrictMiningReach(bot.position(), targetPos)
+                && canSeeBlock((ServerLevel) bot.level(), bot, targetPos);
+    }
+
+    private static boolean canInteractWithBlockFromPosition(Vec3 feetPosition, BlockPos targetPos) {
+        Vec3 eyePosition = feetPosition.add(0.0, 1.62, 0.0);
+        double maxDistanceSqr = 25.0;
         for (Direction direction : Direction.values()) {
             Vec3 faceCenter = Vec3.atCenterOf(targetPos).add(
                     direction.getStepX() * 0.5,
@@ -5948,7 +6051,14 @@ public class FunctionCallerV2 {
     }
 
     private static boolean isStandableAt(ServerLevel world, int x, int y, int z) {
-        return SurvivalGrounding.isStandableFeet(world, new BlockPos(x, y, z));
+        BlockPos feet = new BlockPos(x, y, z);
+        BlockState below = world.getBlockState(feet.below());
+        BlockState body = world.getBlockState(feet);
+        BlockState head = world.getBlockState(feet.above());
+        return !below.isAir()
+                && below.isRedstoneConductor(world, feet.below())
+                && (body.isAir() || body.canBeReplaced())
+                && (head.isAir() || head.canBeReplaced());
     }
 
     private static boolean consumeInventoryItem(Inventory inventory, Item item, int count) {
@@ -7456,7 +7566,9 @@ public class FunctionCallerV2 {
 
         for (BlockPos candidate : candidates) {
             Vec3 standCenter = Vec3.atBottomCenterOf(candidate);
-            if (targetBlock.distToCenterSqr(standCenter) <= 25.0 && canBotOccupy(bot, standCenter, false)) {
+            if (isWithinStrictMiningReach(standCenter, targetBlock)
+                    && canBotOccupy(bot, standCenter, false)
+                    && canSeeBlockFromPosition((ServerLevel) bot.level(), bot, standCenter, targetBlock)) {
                 return candidate;
             }
         }

@@ -22,13 +22,12 @@ import net.shasankp000.Entity.LookController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 public class BlockPlacementTool {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("block-placement-tool");
+    private static final double MAX_PLACEMENT_DISTANCE = 5.0;
 
     /**
      * Places a block at the specified coordinates.
@@ -65,7 +64,17 @@ public class BlockPlacementTool {
                 String normalizedBlockType = normalizeBlockType(blockType);
                 LOGGER.info("Attempting to place {} at {}", normalizedBlockType, targetPos);
 
-                // Step 2: Find the block item in inventory
+                // Step 2: Check if bot is within placement range
+                Vec3 botPos = bot.position();
+                double distance = Math.sqrt(targetPos.distToCenterSqr(botPos));
+                if (distance > MAX_PLACEMENT_DISTANCE) {
+                    String error = String.format("❌ Too far from target position! Distance: %.2f blocks (max: %.2f)",
+                            distance, MAX_PLACEMENT_DISTANCE);
+                    LOGGER.warn(error);
+                    return error;
+                }
+
+                // Step 3: Find the block item in inventory
                 ItemStack blockItem = findBlockInInventory(bot, normalizedBlockType);
                 if (blockItem == null || blockItem.isEmpty()) {
                     String error = "❌ Block not found in inventory: " + normalizedBlockType;
@@ -73,7 +82,7 @@ public class BlockPlacementTool {
                     return error;
                 }
 
-                // Step 3: Switch to the block in hotbar (or move it to hotbar)
+                // Step 4: Switch to the block in hotbar (or move it to hotbar)
                 int hotbarSlot = ensureBlockInHotbar(bot, normalizedBlockType);
                 if (hotbarSlot == -1) {
                     String error = "❌ Could not move block to hotbar: " + normalizedBlockType;
@@ -85,7 +94,7 @@ public class BlockPlacementTool {
                 bot.getInventory().setSelectedSlot(hotbarSlot);
                 LOGGER.info("Switched to hotbar slot {} with {}", hotbarSlot, normalizedBlockType);
 
-                // Step 4: Check if target position is valid for placement
+                // Step 5: Check if target position is valid for placement
                 Level world = bot.level();
                 BlockState targetState = world.getBlockState(targetPos);
                 if (!targetState.isAir() && !targetState.canBeReplaced()) {
@@ -95,15 +104,13 @@ public class BlockPlacementTool {
                 }
 
                 if (botIntersectsTargetBlock(bot, targetPos)) {
-                    String moveResult = moveAwayFromPlacementTarget(bot, targetPos);
-                    if (moveResult.startsWith("❌") || moveResult.startsWith("⚠️")) {
-                        LOGGER.warn(moveResult);
-                        return moveResult;
-                    }
-                    LOGGER.info(moveResult);
+                    String error = "❌ Bot is standing in the placement target at " + targetPos
+                            + "; strict survival mode will not teleport away. Move first, then place the block.";
+                    LOGGER.warn(error);
+                    return error;
                 }
 
-                // Step 5: Find a suitable face to place against
+                // Step 6: Find a suitable face to place against
                 boolean hasPlacementSurface = hasPlacementSurface(world, targetPos);
                 Direction placementDirection = findPlacementDirection(world, bot, targetPos);
                 if (placementDirection == null) {
@@ -116,18 +123,18 @@ public class BlockPlacementTool {
 
                 BlockPos adjacentPos = targetPos.relative(placementDirection);
 
-                // Step 6: Look at the target position
+                // Step 7: Look at the target position
                 LookController.faceBlock(bot, adjacentPos);
 
-                // Step 7: Perform block placement
+                // Step 8: Perform block placement
                 Vec3 hitVec = Vec3.atCenterOf(adjacentPos).add(
                         placementDirection.getOpposite().getStepX() * 0.5,
                         placementDirection.getOpposite().getStepY() * 0.5,
                         placementDirection.getOpposite().getStepZ() * 0.5
                 );
 
-                if (!SurvivalInteractionValidator.canReachVisibleFace(bot, adjacentPos, placementDirection.getOpposite())) {
-                    String error = "❌ Cannot place through blocks or outside survival reach at " + targetPos;
+                if (!hasLineOfSightToPlacementFace(world, bot, adjacentPos, hitVec, placementDirection.getOpposite())) {
+                    String error = "❌ Cannot place through blocks at " + targetPos;
                     LOGGER.warn(error);
                     return error;
                 }
@@ -171,33 +178,6 @@ public class BlockPlacementTool {
 
     private static boolean botIntersectsTargetBlock(ServerPlayer bot, BlockPos targetPos) {
         return blockBox(targetPos).intersects(bot.getBoundingBox().inflate(0.01));
-    }
-
-    private static String moveAwayFromPlacementTarget(ServerPlayer bot, BlockPos targetPos) {
-        Level world = bot.level();
-        List<BlockPos> candidates = List.of(
-                bot.blockPosition().north(),
-                bot.blockPosition().south(),
-                bot.blockPosition().east(),
-                bot.blockPosition().west(),
-                targetPos.north(),
-                targetPos.south(),
-                targetPos.east(),
-                targetPos.west(),
-                bot.blockPosition().above()
-        );
-
-        for (BlockPos candidate : candidates) {
-            if (candidate.equals(targetPos) || !canStandForPlacement(bot, world, candidate, targetPos)) {
-                continue;
-            }
-
-            // Placement runs on the server thread and cannot block while the bot
-            // walks. Do not turn an overlap correction into a free teleport.
-            return "❌ Bot must walk away from placement target " + targetPos + " before placing";
-        }
-
-        return "❌ Bot is standing in the placement target at " + targetPos + " and no safe adjacent step was found";
     }
 
     private static boolean canStandForPlacement(ServerPlayer bot, Level world, BlockPos feet, BlockPos targetPos) {
@@ -356,7 +336,7 @@ public class BlockPlacementTool {
                         direction.getOpposite().getStepY() * 0.5,
                         direction.getOpposite().getStepZ() * 0.5
                 );
-                if (SurvivalInteractionValidator.canReachVisibleFace(bot, adjacentPos, direction.getOpposite())) {
+                if (hasLineOfSightToPlacementFace(world, bot, adjacentPos, hitVec, direction.getOpposite())) {
                     return direction;
                 }
             }

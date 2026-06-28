@@ -140,12 +140,21 @@ public class createFakePlayer extends ServerPlayer {
         instance.teleportTo(worldIn, pos.x, pos.y, pos.z, java.util.Set.of(), (float) yaw, (float) pitch, false);
         instance.setHealth(20.0F);
         instance.unsetRemoved();
-        instance.gameMode.changeGameModeForPlayer(gamemode);
+        instance.gameMode.changeGameModeForPlayer(GameType.SURVIVAL);
         server.getPlayerList().broadcastAll(
                 new ClientboundRotateHeadPacket(instance, (byte) (instance.yHeadRot * 256 / 360)), dimensionId);
         instance.entityData.set(DATA_PLAYER_MODE_CUSTOMISATION, (byte) 0x7f);
-        instance.getAbilities().flying = flying;
+        enforceStrictSurvivalAbilities(instance);
         return instance;
+    }
+
+    private static void enforceStrictSurvivalAbilities(ServerPlayer player) {
+        player.getAbilities().invulnerable = false;
+        player.getAbilities().flying = false;
+        player.getAbilities().mayfly = false;
+        player.getAbilities().instabuild = false;
+        player.getAbilities().mayBuild = true;
+        player.onUpdateAbilities();
     }
 
     private static final class FakeClientConnection extends net.minecraft.network.Connection {
